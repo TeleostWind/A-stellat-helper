@@ -157,7 +157,7 @@ async def generate_shea_compliment():
                     else:
                         error_text = await response.text()
                         print(f"API Error (Status {response.status}): {error_text}")
-                        return f"Error: AI service returned status {response.status}"
+                        return f"Error: AI service returned status {response.status}."
         except ClientConnectorError:
             await asyncio.sleep(2**attempt)
         except Exception as e:
@@ -340,7 +340,13 @@ async def compliment_shea(interaction: discord.Interaction):
     
     compliment = await generate_shea_compliment()
     
-    await interaction.followup.send(f"✨ A message for Shea: {compliment}")
+    # Check for specific error messages returned by generate_shea_compliment
+    if compliment.startswith("Error:"):
+        # Respond with the detailed error message returned from the AI function
+        await interaction.followup.send(f"❌ **AI Compliment Failed!** Reason: {compliment}", ephemeral=False)
+    else:
+        # Success path
+        await interaction.followup.send(f"✨ A message for Shea: {compliment}")
 
 
 # --- Main Entry Point ---
