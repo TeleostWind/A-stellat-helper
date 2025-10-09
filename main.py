@@ -200,7 +200,7 @@ async def manual_schedule(interaction: discord.Interaction, message: str, interv
 
 @tree.command(name="automatic", description="Schedule an AI message based on a single prompt (e.g., 'Say 'bark' every 10 seconds').")
 @discord.app_commands.describe(full_prompt="The message prompt AND interval (e.g., 'Say a fun fact every 2 hours').")
-async def automatic_schedule(interaction: discord.Interaction, full_prompt: str):
+async def automatic_schedule(interaction: discord.Interaction, full_prompt: str): # REMOVED interval_hours: float
     if not GEMINI_API_KEY: 
         await interaction.response.send_message("❌ **Error:** `GEMINI_API_KEY` is missing.", ephemeral=True); 
         return
