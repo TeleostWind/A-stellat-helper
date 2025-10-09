@@ -135,7 +135,6 @@ async def generate_shea_compliment():
     
     system_prompt = "You are a compliment generator. Create a single, short, and weirdly specific compliment about 'Shea'. The compliment must be between 5 and 40 words. Do not use markdown titles or headers, just the text of the compliment."
     
-    # Prompt is generic since the instruction is in the system prompt
     prompt = "Generate a compliment for Shea."
     
     payload = {
@@ -165,6 +164,43 @@ async def generate_shea_compliment():
             break
     return "Error: Failed to connect to AI service after multiple retries."
 
+async def generate_shea_insult():
+    """
+    Calls the Gemini API to generate a funny, passive-aggressive insult for Shea.
+    """
+    if not GEMINI_API_KEY: return "Error: Gemini API Key not configured."
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={GEMINI_API_KEY}"
+    
+    system_prompt = "You are an insult generator. Create a single, funny, and passive-aggressive insult directed at 'Shea'. The insult must be between 5 and 40 words. Frame it as a backhanded compliment or a gentle, confusing dig. Do not use markdown titles or headers, just the text of the insult."
+    
+    prompt = "Generate a passive-aggressive insult for Shea."
+    
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+    }
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            async with ClientSession() as session:
+                async with session.post(url, headers={'Content-Type': 'application/json'}, json=payload) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'Shea, your ability to consistently not be the worst person in the room is truly inspiring.')
+                        return text
+                    elif response.status == 429:
+                        await asyncio.sleep(2**attempt)
+                    else:
+                        error_text = await response.text()
+                        print(f"API Error (Status {response.status}): {error_text}")
+                        return f"Error: AI service returned status {response.status}."
+        except ClientConnectorError:
+            await asyncio.sleep(2**attempt)
+        except Exception as e:
+            print(f"An unexpected error occurred during API call: {e}")
+            break
+    return "Error: Failed to connect to AI service after multiple retries."
 
 # --- Background Task ---
 
@@ -340,13 +376,25 @@ async def compliment_shea(interaction: discord.Interaction):
     
     compliment = await generate_shea_compliment()
     
-    # Check for specific error messages returned by generate_shea_compliment
     if compliment.startswith("Error:"):
-        # Respond with the detailed error message returned from the AI function
         await interaction.followup.send(f"❌ **AI Compliment Failed!** Reason: {compliment}", ephemeral=False)
     else:
-        # Success path
         await interaction.followup.send(f"✨ A message for Shea: {compliment}")
+
+@tree.command(name="sheainsult", description="Insults Shea in a funny, passive-aggressive way.")
+async def insult_shea(interaction: discord.Interaction):
+    if not GEMINI_API_KEY: 
+        await interaction.response.send_message("❌ **Error:** `GEMINI_API_KEY` is missing.", ephemeral=True); 
+        return
+    
+    await interaction.response.defer(ephemeral=False)
+    
+    insult = await generate_shea_insult()
+    
+    if insult.startswith("Error:"):
+        await interaction.followup.send(f"❌ **AI Insult Failed!** Reason: {insult}", ephemeral=False)
+    else:
+        await interaction.followup.send(f"☕ A kind message for Shea: {insult}")
 
 
 # --- Main Entry Point ---
