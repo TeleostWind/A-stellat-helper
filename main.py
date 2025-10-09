@@ -126,6 +126,45 @@ async def parse_automatic_prompt(full_prompt):
     except Exception as e:
         return None, f"An error occurred during AI parsing: {e}"
 
+async def generate_shea_compliment():
+    """
+    Calls the Gemini API to generate a weird, short compliment for Shea.
+    """
+    if not GEMINI_API_KEY: return "Error: Gemini API Key not configured."
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={GEMINI_API_KEY}"
+    
+    system_prompt = "You are a compliment generator. Create a single, short, and weirdly specific compliment about 'Shea'. The compliment must be between 5 and 40 words. Do not use markdown titles or headers, just the text of the compliment."
+    
+    # Prompt is generic since the instruction is in the system prompt
+    prompt = "Generate a compliment for Shea."
+    
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+    }
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            async with ClientSession() as session:
+                async with session.post(url, headers={'Content-Type': 'application/json'}, json=payload) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'Shea is like a perfectly aged cheese—complex and delightful.')
+                        return text
+                    elif response.status == 429:
+                        await asyncio.sleep(2**attempt)
+                    else:
+                        error_text = await response.text()
+                        print(f"API Error (Status {response.status}): {error_text}")
+                        return f"Error: AI service returned status {response.status}"
+        except ClientConnectorError:
+            await asyncio.sleep(2**attempt)
+        except Exception as e:
+            print(f"An unexpected error occurred during API call: {e}")
+            break
+    return "Error: Failed to connect to AI service after multiple retries."
+
 
 # --- Background Task ---
 
@@ -200,7 +239,7 @@ async def manual_schedule(interaction: discord.Interaction, message: str, interv
 
 @tree.command(name="automatic", description="Schedule an AI message based on a single prompt (e.g., 'Say 'bark' every 10 seconds').")
 @discord.app_commands.describe(full_prompt="The message prompt AND interval (e.g., 'Say a fun fact every 2 hours').")
-async def automatic_schedule(interaction: discord.Interaction, full_prompt: str): # REMOVED interval_hours: float
+async def automatic_schedule(interaction: discord.Interaction, full_prompt: str): 
     if not GEMINI_API_KEY: 
         await interaction.response.send_message("❌ **Error:** `GEMINI_API_KEY` is missing.", ephemeral=True); 
         return
@@ -251,7 +290,11 @@ async def stop_schedule(interaction: discord.Interaction):
     if BOT_STATE.scheduled_channel_id is None: await interaction.response.send_message("No schedule running.", ephemeral=True); return
     BOT_STATE.scheduled_channel_id = None
     BOT_STATE.interval_seconds = 0
-    await interaction.response.send_message("🛑 **Schedule has been stopped.**", ephemeral=False)
+    BOT_STATE.interval_hours = 0
+    BOT_STATE.is_automatic = False
+    BOT_STATE.ai_prompt = ""
+    BOT_STATE.scheduled_message_content = ""
+    await interaction.response.send_message("🛑 **All announcements have been stopped and cleared.**", ephemeral=False)
 
 @tree.command(name="status", description="Check the status of the current scheduled announcement.")
 async def get_status(interaction: discord.Interaction):
@@ -286,6 +329,18 @@ async def get_status(interaction: discord.Interaction):
         f"**Paused (Idle Channel):** {is_waiting}"
     )
     await interaction.response.send_message(response_text, ephemeral=True)
+
+@tree.command(name="shea", description="Gives Shea a random, weirdly specific compliment.")
+async def compliment_shea(interaction: discord.Interaction):
+    if not GEMINI_API_KEY: 
+        await interaction.response.send_message("❌ **Error:** `GEMINI_API_KEY` is missing.", ephemeral=True); 
+        return
+    
+    await interaction.response.defer(ephemeral=False)
+    
+    compliment = await generate_shea_compliment()
+    
+    await interaction.followup.send(f"✨ A message for Shea: {compliment}")
 
 
 # --- Main Entry Point ---
