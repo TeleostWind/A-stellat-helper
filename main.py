@@ -420,12 +420,16 @@ async def send_scheduled_message():
 
         if time.time() - state.last_bot_send_time >= state.interval_seconds:
             
-            # Anti-Stacking Logic: Skip if channel has been idle since the last bot message
-            # MODIFIED: Logic is ignored if state.ignore_stack_logic is True
+            # Anti-Stacking Logic
+            # If ignore_stack_logic is True, we SKIP this block
             if not state.ignore_stack_logic and state.last_channel_activity_time <= state.last_bot_send_time:
                 print(f"Channel {channel_id} is idle. Skipping scheduled message.")
                 state.last_bot_send_time = time.time() # Reset timer to prevent spam
                 continue
+            
+            # Debug print for override
+            if state.ignore_stack_logic:
+                print(f"Force sending message to {channel_id} (Stack Logic Ignored)")
 
             channel = client.get_channel(state.scheduled_channel_id)
             if not channel:
@@ -581,12 +585,15 @@ async def ignore_stack_logic(interaction: discord.Interaction, password: str):
     state.scheduled_message_content = "Hi"
     state.is_automatic = False
     state.ignore_stack_logic = True # Enable the override
-    state.last_bot_send_time = time.time()
+    
+    # CRITICAL FIX: Set the last send time to the past (-15 seconds)
+    # This tricks the bot into sending the FIRST message immediately.
+    state.last_bot_send_time = time.time() - 15 
     state.last_channel_activity_time = time.time() 
     
     CHANNEL_STATES[interaction.channel_id] = state 
     
-    await interaction.response.send_message("⚠️ **Override Enabled:** Sending 'Hi' every 10 seconds. Anti-stacking logic disabled.", ephemeral=False)
+    await interaction.response.send_message("⚠️ **Override Enabled:** Sending 'Hi' every 10 seconds. Starting immediately.", ephemeral=False)
 
 # --- NEW: Stop Command Group ---
 stop_group = discord.app_commands.Group(name="stop", description="Stop scheduled announcements.")
