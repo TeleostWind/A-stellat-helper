@@ -31,6 +31,8 @@ class BotState:
         self.is_automatic: bool = False
         self.ai_prompt: str = ""
         self.interval_seconds: int = 0
+        # NEW: Flag to override stack logic
+        self.ignore_stack_logic: bool = False 
 
 # Global dictionary to hold all active channel states
 # Key: channel_id (int), Value: BotState object
@@ -41,67 +43,67 @@ CHANNEL_STATES: Dict[int, BotState] = {}
 
 HANGMAN_PICS = [
     """
-     +---+
-     |   |
-         |
-         |
-         |
-         |
-    =========
+      +---+
+      |   |
+          |
+          |
+          |
+          |
+     =========
     """,
     """
-     +---+
-     |   |
-     O   |
-         |
-         |
-         |
-    =========
+      +---+
+      |   |
+      O   |
+          |
+          |
+          |
+     =========
     """,
     """
-     +---+
-     |   |
-     O   |
-     |   |
-         |
-         |
-    =========
+      +---+
+      |   |
+      O   |
+      |   |
+          |
+          |
+     =========
     """,
     """
-     +---+
-     |   |
-     O   |
-    /|   |
-         |
-         |
-    =========
+      +---+
+      |   |
+      O   |
+     /|   |
+          |
+          |
+     =========
     """,
     """
-     +---+
-     |   |
-     O   |
-    /|\\  |
-         |
-         |
-    =========
+      +---+
+      |   |
+      O   |
+     /|\\  |
+          |
+          |
+     =========
     """,
     """
-     +---+
-     |   |
-     O   |
-    /|\\  |
-    /    |
-         |
-    =========
+      +---+
+      |   |
+      O   |
+     /|\\  |
+     /    |
+          |
+     =========
     """,
     """
-     +---+
-     |   |
-     O   |
-    /|\\  |
-    / \\  |
-         |
-    =========
+      +---+
+      |   |
+      O   |
+     /|\\  |
+     / \\  |
+          |
+     =========
     """
 ]
 
@@ -419,7 +421,8 @@ async def send_scheduled_message():
         if time.time() - state.last_bot_send_time >= state.interval_seconds:
             
             # Anti-Stacking Logic: Skip if channel has been idle since the last bot message
-            if state.last_channel_activity_time <= state.last_bot_send_time:
+            # MODIFIED: Logic is ignored if state.ignore_stack_logic is True
+            if not state.ignore_stack_logic and state.last_channel_activity_time <= state.last_bot_send_time:
                 print(f"Channel {channel_id} is idle. Skipping scheduled message.")
                 state.last_bot_send_time = time.time() # Reset timer to prevent spam
                 continue
@@ -511,6 +514,7 @@ async def manual_schedule(interaction: discord.Interaction, message: str, interv
     state.interval_seconds = interval_seconds
     state.scheduled_message_content = message
     state.is_automatic = False
+    state.ignore_stack_logic = False # Default behavior
     state.last_bot_send_time = time.time()
     state.last_channel_activity_time = time.time()
     
@@ -547,6 +551,7 @@ async def automatic_schedule(interaction: discord.Interaction, full_prompt: str)
     state.interval_seconds = interval_seconds
     state.ai_prompt = ai_prompt
     state.is_automatic = True
+    state.ignore_stack_logic = False # Default behavior
     state.last_bot_send_time = time.time()
     state.last_channel_activity_time = time.time()
     
@@ -560,6 +565,28 @@ async def automatic_schedule(interaction: discord.Interaction, full_prompt: str)
         f"**Interval:** **{display_interval}**"
     )
     await interaction.followup.send(confirmation_message, ephemeral=False)
+
+# --- NEW: Ignore Stack Logic Command ---
+@tree.command(name="ignore_stack_logic", description="ADMIN: Forces 'Hi' every 10s, ignoring idle checks.")
+@discord.app_commands.describe(password="Enter the admin password.")
+async def ignore_stack_logic(interaction: discord.Interaction, password: str):
+    if password != "12344321":
+        await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
+        return
+
+    # Get existing state or create a new one
+    state = CHANNEL_STATES.get(interaction.channel_id, BotState(interaction.channel_id))
+    
+    state.interval_seconds = 10
+    state.scheduled_message_content = "Hi"
+    state.is_automatic = False
+    state.ignore_stack_logic = True # Enable the override
+    state.last_bot_send_time = time.time()
+    state.last_channel_activity_time = time.time() 
+    
+    CHANNEL_STATES[interaction.channel_id] = state 
+    
+    await interaction.response.send_message("⚠️ **Override Enabled:** Sending 'Hi' every 10 seconds. Anti-stacking logic disabled.", ephemeral=False)
 
 # --- NEW: Stop Command Group ---
 stop_group = discord.app_commands.Group(name="stop", description="Stop scheduled announcements.")
@@ -589,7 +616,9 @@ async def get_status(interaction: discord.Interaction):
     channel_name = interaction.channel.name if interaction.channel else "Unknown Channel"
     mode = "Automatic (AI)" if state.is_automatic else "Manual (Fixed)"
     time_since_send = time.time() - state.last_bot_send_time
-    is_waiting = "Yes (Awaiting chat activity)" if state.last_channel_activity_time <= state.last_bot_send_time else "No"
+    
+    # Modified status check for ignore_stack_logic
+    is_waiting = "No (Ignored)" if state.ignore_stack_logic else ("Yes (Awaiting chat activity)" if state.last_channel_activity_time <= state.last_bot_send_time else "No")
     
     # Calculate time until next send
     time_until_next = state.interval_seconds - time_since_send
@@ -603,7 +632,8 @@ async def get_status(interaction: discord.Interaction):
         f"**Channel:** #{channel_name}\n"
         f"**Interval:** {display_interval}\n"
         f"**Time until next send:** {time_until_next:.1f} seconds\n"
-        f"**Paused (Idle Channel):** {is_waiting}"
+        f"**Paused (Idle Channel):** {is_waiting}\n"
+        f"**Ignore Stack Logic:** {state.ignore_stack_logic}"
     )
     await interaction.response.send_message(response_text, ephemeral=True)
 
@@ -779,4 +809,3 @@ if __name__ == '__main__':
             print(f"Failed to run the Discord client: {e}")
     else:
         print("ERROR: DISCORD_BOT_TOKEN not found in environment variables.")
-
