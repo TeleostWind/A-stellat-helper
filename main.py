@@ -434,9 +434,10 @@ async def generate_chat_response(user_id, user_name, user_input):
         USER_CHAT_CONTEXTS[user_id] = history
 
     # 3. System Prompt (Persona)
-    # UPDATED: Added instructions to keep responses short and match user length.
+    # UPDATED: Smart but humble, and short responses.
     persona_prompt = (
-        f"You are an 18-year-old girl. You are highly intelligent, very funny, and you are allowed to swear. "
+        f"You are an 18-year-old girl. You are smart, witty, and funny, but you are humble and chill. "
+        f"You are NOT cocky, arrogant, or a know-it-all. You are allowed to swear. "
         f"You are chatting with a user named {user_name} on Discord. "
         "IMPORTANT: Keep your responses short and concise. Match the length of the user's message. "
         "If they send a short text, reply with a short text. Never write a paragraph unless the topic is deep. "
@@ -581,13 +582,16 @@ def get_display_interval(interval_seconds: int) -> str:
 @tree.command(name="manual", description="Schedule a fixed message for this channel.")
 @discord.app_commands.describe(message="The exact message to repeat.", interval_hours="The interval in hours (e.g., 2 or 0.5).")
 async def manual_schedule(interaction: discord.Interaction, message: str, interval_hours: float):
+    # FIXED: Added defer to prevent timeout
+    await interaction.response.defer(ephemeral=False)
+    
     if interval_hours <= 0:
-        await interaction.response.send_message("The interval must be > 0.", ephemeral=True)
+        await interaction.followup.send("The interval must be > 0.", ephemeral=True)
         return
 
     interval_seconds = int(interval_hours * 3600)
     if interval_seconds < 10:
-        await interaction.response.send_message("The interval is too short (minimum 10 seconds).", ephemeral=True)
+        await interaction.followup.send("The interval is too short (minimum 10 seconds).", ephemeral=True)
         return
 
     # Get existing state or create a new one
@@ -602,7 +606,7 @@ async def manual_schedule(interaction: discord.Interaction, message: str, interv
     
     CHANNEL_STATES[interaction.channel_id] = state # Add/update in global dict
     
-    await interaction.response.send_message(f"✅ **Manual Scheduled!** Interval: **{interval_hours} hours**.", ephemeral=False)
+    await interaction.followup.send(f"✅ **Manual Scheduled!** Interval: **{interval_hours} hours**.")
 
 @tree.command(name="automatic", description="Schedule an AI message for this channel (e.g., 'Say 'bark' every 10 seconds').")
 @discord.app_commands.describe(full_prompt="The message prompt AND interval (e.g., 'Say a fun fact every 2 hours').")
@@ -655,6 +659,9 @@ async def ignore_stack_logic(interaction: discord.Interaction, password: str):
     if password != "12344321":
         await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
         return
+    
+    # FIXED: Defer to prevent timeout
+    await interaction.response.defer(ephemeral=False)
 
     # Get existing state or create a new one
     state = CHANNEL_STATES.get(interaction.channel_id, BotState(interaction.channel_id))
@@ -671,7 +678,7 @@ async def ignore_stack_logic(interaction: discord.Interaction, password: str):
     
     CHANNEL_STATES[interaction.channel_id] = state 
     
-    await interaction.response.send_message("⚠️ **Override Enabled:** Sending 'Hi' every 10 seconds. Starting immediately.", ephemeral=False)
+    await interaction.followup.send("⚠️ **Override Enabled:** Sending 'Hi' every 10 seconds. Starting immediately.")
 
 # --- NEW: Chat Mode Command ---
 @tree.command(name="chat", description="Enable/Disable the 18yo Chat Persona.")
@@ -684,17 +691,22 @@ async def ignore_stack_logic(interaction: discord.Interaction, password: str):
 async def chat_mode_toggle(interaction: discord.Interaction, action: str, password: str):
     global CHAT_MODE_ACTIVE
     
+    # 1. Check password fast. If wrong, send ephemeral error immediately.
     if password != "12344321":
         await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
         return
 
+    # 2. Defer immediately (ephemeral=False so everyone sees status change).
+    # This prevents the 10062 "Unknown Interaction" error.
+    await interaction.response.defer(ephemeral=False)
+
     if action == "start":
         CHAT_MODE_ACTIVE = True
-        await interaction.response.send_message("🟢 **Chat Mode Activated!** She is awake. (Ping her to talk)", ephemeral=False)
+        await interaction.followup.send("🟢 **Chat Mode Activated!** She is awake. (Ping her to talk)")
     else:
         CHAT_MODE_ACTIVE = False
         USER_CHAT_CONTEXTS.clear() # Clear memory on stop
-        await interaction.response.send_message("🔴 **Chat Mode Deactivated.** She is asleep.", ephemeral=False)
+        await interaction.followup.send("🔴 **Chat Mode Deactivated.** She is asleep.")
 
 
 # --- NEW: Global Announcement Command ---
@@ -704,6 +716,9 @@ async def global_announcement(interaction: discord.Interaction, channel_id: str,
     if password != "1234321":
         await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
         return
+    
+    # FIXED: Defer to prevent timeout
+    await interaction.response.defer(ephemeral=True)
 
     try:
         # Convert ID to int just in case
@@ -715,18 +730,18 @@ async def global_announcement(interaction: discord.Interaction, channel_id: str,
             try:
                 target_channel = await client.fetch_channel(target_id)
             except:
-                await interaction.response.send_message(f"❌ **Error:** Could not find channel with ID `{channel_id}`.", ephemeral=True)
+                await interaction.followup.send(f"❌ **Error:** Could not find channel with ID `{channel_id}`.", ephemeral=True)
                 return
         
         await target_channel.send(message)
-        await interaction.response.send_message(f"✅ **Announcement sent** to {target_channel.mention}!", ephemeral=True)
+        await interaction.followup.send(f"✅ **Announcement sent** to {target_channel.mention}!", ephemeral=True)
         
     except ValueError:
-        await interaction.response.send_message("❌ **Error:** Invalid Channel ID format.", ephemeral=True)
+        await interaction.followup.send("❌ **Error:** Invalid Channel ID format.", ephemeral=True)
     except discord.Forbidden:
-         await interaction.response.send_message("❌ **Error:** I don't have permission to speak in that channel.", ephemeral=True)
+         await interaction.followup.send("❌ **Error:** I don't have permission to speak in that channel.", ephemeral=True)
     except Exception as e:
-        await interaction.response.send_message(f"❌ **Error:** {e}", ephemeral=True)
+        await interaction.followup.send(f"❌ **Error:** {e}", ephemeral=True)
 
 
 # --- NEW: Stop Command Group ---
