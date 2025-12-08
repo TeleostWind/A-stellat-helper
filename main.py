@@ -6,7 +6,7 @@ from discord.ext import tasks
 from aiohttp import ClientSession, ClientConnectorError
 import json
 import time
-from typing import Dict, Set
+from typing import Dict, Set, List
 
 # --- Configuration ---
 # Load environment variables (set in Railway dashboard)
@@ -37,6 +37,11 @@ class BotState:
 # Global dictionary to hold all active channel states
 # Key: channel_id (int), Value: BotState object
 CHANNEL_STATES: Dict[int, BotState] = {}
+
+# --- Chat Mode State ---
+CHAT_MODE_ACTIVE = False
+# Key: user_id (int), Value: List of message history dicts for Gemini
+USER_CHAT_CONTEXTS: Dict[int, List[Dict]] = {}
 
 
 # --- Hangman Game State ---
@@ -82,7 +87,7 @@ HANGMAN_PICS = [
       +---+
       |   |
       O   |
-     /|\\  |
+     /|\  |
           |
           |
      =========
@@ -91,7 +96,7 @@ HANGMAN_PICS = [
       +---+
       |   |
       O   |
-     /|\\  |
+     /|\  |
      /    |
           |
      =========
@@ -100,8 +105,8 @@ HANGMAN_PICS = [
       +---+
       |   |
       O   |
-     /|\\  |
-     / \\  |
+     /|\  |
+     / \  |
           |
      =========
     """
@@ -407,6 +412,59 @@ async def get_hangman_word():
         except (IndexError, KeyError, TypeError, json.JSONDecodeError):
             return "fallback", None # Fallback
 
+# --- NEW: Chat Logic ---
+async def generate_chat_response(user_id, user_name, user_input):
+    if not GEMINI_API_KEY: return "My brain is missing (API Key Error)."
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+    
+    # 1. Retrieve or Initialize History
+    if user_id not in USER_CHAT_CONTEXTS:
+        USER_CHAT_CONTEXTS[user_id] = []
+    
+    history = USER_CHAT_CONTEXTS[user_id]
+    
+    # 2. Append User Message
+    history.append({"role": "user", "parts": [{"text": user_input}]})
+    
+    # Keep history manageable (last 10 messages = 5 turns)
+    if len(history) > 10:
+        history = history[-10:]
+        USER_CHAT_CONTEXTS[user_id] = history
+
+    # 3. System Prompt (Persona)
+    persona_prompt = (
+        f"You are an 18-year-old girl. You are highly intelligent, very funny, and you are allowed to swear. "
+        f"You are chatting with a user named {user_name} on Discord. "
+        "Keep your responses casual, sometimes use slang, and do not be repetitive or robotic. "
+        "Do not offer to 'assist' like an AI, just hang out and chat."
+    )
+
+    payload = {
+        "contents": history,
+        "systemInstruction": {"parts": [{"text": persona_prompt}]},
+    }
+
+    async with ClientSession() as session:
+        result, error = await fetch_with_backoff(session, url, payload)
+        
+        if error:
+            return "I'm having a headache. (API Error)"
+
+        try:
+            response_text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
+            
+            if response_text:
+                # Add model response to history
+                history.append({"role": "model", "parts": [{"text": response_text}]})
+                USER_CHAT_CONTEXTS[user_id] = history # Update global dict
+                return response_text
+            else:
+                return "..."
+                
+        except (IndexError, KeyError, TypeError):
+            return "I don't know what to say."
+
 
 # --- Background Task (Refactored) ---
 
@@ -478,6 +536,23 @@ async def on_message(message):
     if message.channel.id in CHANNEL_STATES:
         CHANNEL_STATES[message.channel.id].last_channel_activity_time = time.time()
     
+    # --- NEW: Chat Mode Trigger ---
+    if CHAT_MODE_ACTIVE:
+        is_mentioned = client.user in message.mentions
+        is_reply = (message.reference and message.reference.resolved and 
+                    message.reference.resolved.author == client.user)
+        
+        if is_mentioned or is_reply:
+            # Show typing indicator while generating
+            async with message.channel.typing():
+                # Clean content: Remove bot mention from text to not confuse AI
+                clean_text = message.content.replace(f'<@{client.user.id}>', '').strip()
+                if not clean_text: clean_text = "Hello!" # Handle empty ping
+                
+                response = await generate_chat_response(message.author.id, message.author.name, clean_text)
+                await message.reply(response)
+            return # Don't process other logic if we chatted
+
     # Check if this is a guess for a hangman game
     if message.channel.id in HANGMAN_GAMES:
         # We handle guesses via slash command now, so this can be ignored
@@ -594,6 +669,61 @@ async def ignore_stack_logic(interaction: discord.Interaction, password: str):
     CHANNEL_STATES[interaction.channel_id] = state 
     
     await interaction.response.send_message("⚠️ **Override Enabled:** Sending 'Hi' every 10 seconds. Starting immediately.", ephemeral=False)
+
+# --- NEW: Chat Mode Command ---
+@tree.command(name="chat", description="Enable/Disable the 18yo Chat Persona.")
+@discord.app_commands.describe(action="Start or Stop", password="Password required.")
+@discord.app_commands.choices(action=[
+    discord.app_commands.Choice(name="Start", value="start"),
+    discord.app_commands.Choice(name="Stop", value="stop")
+])
+async def chat_mode_toggle(interaction: discord.Interaction, action: discord.Choice[str], password: str):
+    global CHAT_MODE_ACTIVE
+    
+    if password != "12344321":
+        await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
+        return
+
+    if action.value == "start":
+        CHAT_MODE_ACTIVE = True
+        await interaction.response.send_message("🟢 **Chat Mode Activated!** She is awake. (Ping her to talk)", ephemeral=False)
+    else:
+        CHAT_MODE_ACTIVE = False
+        USER_CHAT_CONTEXTS.clear() # Clear memory on stop
+        await interaction.response.send_message("🔴 **Chat Mode Deactivated.** She is asleep.", ephemeral=False)
+
+
+# --- NEW: Global Announcement Command ---
+@tree.command(name="announcement", description="Send an announcement to a specific channel ID.")
+@discord.app_commands.describe(channel_id="The ID of the channel to send to", message="The text to send", password="Password required.")
+async def global_announcement(interaction: discord.Interaction, channel_id: str, message: str, password: str):
+    if password != "1234321":
+        await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
+        return
+
+    try:
+        # Convert ID to int just in case
+        target_id = int(channel_id)
+        target_channel = client.get_channel(target_id)
+        
+        if not target_channel:
+             # Try to fetch if not in cache (rare but possible)
+            try:
+                target_channel = await client.fetch_channel(target_id)
+            except:
+                await interaction.response.send_message(f"❌ **Error:** Could not find channel with ID `{channel_id}`.", ephemeral=True)
+                return
+        
+        await target_channel.send(message)
+        await interaction.response.send_message(f"✅ **Announcement sent** to {target_channel.mention}!", ephemeral=True)
+        
+    except ValueError:
+        await interaction.response.send_message("❌ **Error:** Invalid Channel ID format.", ephemeral=True)
+    except discord.Forbidden:
+         await interaction.response.send_message("❌ **Error:** I don't have permission to speak in that channel.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ **Error:** {e}", ephemeral=True)
+
 
 # --- NEW: Stop Command Group ---
 stop_group = discord.app_commands.Group(name="stop", description="Stop scheduled announcements.")
