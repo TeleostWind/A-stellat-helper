@@ -46,8 +46,9 @@ USER_CHAT_CONTEXTS: Dict[int, List[Dict]] = {}
 
 # --- Hangman Game State ---
 
+# FIXED: Added 'r' before strings to handle backslashes correctly
 HANGMAN_PICS = [
-    """
+    r"""
       +---+
       |   |
           |
@@ -56,25 +57,25 @@ HANGMAN_PICS = [
           |
      =========
     """,
-    """
-      +---+
-      |   |
-      O   |
-          |
-          |
-          |
-     =========
-    """,
-    """
+    r"""
       +---+
       |   |
       O   |
+          |
+          |
+          |
+     =========
+    """,
+    r"""
+      +---+
+      |   |
+      O   |
       |   |
           |
           |
      =========
     """,
-    """
+    r"""
       +---+
       |   |
       O   |
@@ -83,7 +84,7 @@ HANGMAN_PICS = [
           |
      =========
     """,
-    """
+    r"""
       +---+
       |   |
       O   |
@@ -92,7 +93,7 @@ HANGMAN_PICS = [
           |
      =========
     """,
-    """
+    r"""
       +---+
       |   |
       O   |
@@ -101,7 +102,7 @@ HANGMAN_PICS = [
           |
      =========
     """,
-    """
+    r"""
       +---+
       |   |
       O   |
@@ -677,14 +678,15 @@ async def ignore_stack_logic(interaction: discord.Interaction, password: str):
     discord.app_commands.Choice(name="Start", value="start"),
     discord.app_commands.Choice(name="Stop", value="stop")
 ])
-async def chat_mode_toggle(interaction: discord.Interaction, action: discord.Choice[str], password: str):
+# FIXED: Changed discord.Choice[str] to str
+async def chat_mode_toggle(interaction: discord.Interaction, action: str, password: str):
     global CHAT_MODE_ACTIVE
     
     if password != "12344321":
         await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
         return
 
-    if action.value == "start":
+    if action == "start":
         CHAT_MODE_ACTIVE = True
         await interaction.response.send_message("🟢 **Chat Mode Activated!** She is awake. (Ping her to talk)", ephemeral=False)
     else:
