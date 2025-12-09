@@ -219,8 +219,8 @@ async def generate_announcement_content(prompt):
     Calls the Gemini API to generate the announcement message.
     """
     if not GEMINI_API_KEY: return "Error: Gemini API Key not configured."
-    # UPDATED to gemini-2.5-flash-preview-09-2025
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+    # FIXED: Switched to gemini-1.5-flash for higher rate limits
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     
     system_prompt = "You are a fun, engaging, and concise community announcer bot. Generate a short, relevant message based on the user's prompt. Do not use markdown titles or headers, just plain text."
     
@@ -247,8 +247,8 @@ async def parse_automatic_prompt(full_prompt):
     Uses Gemini's structured output to parse the message and interval from a single prompt.
     """
     if not GEMINI_API_KEY: return None, "Error: Gemini API Key not configured."
-    # UPDATED to gemini-2.5-flash-preview-09-2025
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+    # FIXED: Switched to gemini-1.5-flash for higher rate limits
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     
     system_prompt = (
         "Analyze the user's full request. Extract the core announcement message/prompt and the time interval. "
@@ -300,7 +300,8 @@ async def parse_automatic_prompt(full_prompt):
 
 async def generate_shea_compliment():
     if not GEMINI_API_KEY: return "Error: Gemini API Key not configured."
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+    # FIXED: Switched to gemini-1.5-flash
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     system_prompt = "You are a compliment generator. Create a single, short, and weirdly specific compliment about 'Shea'. The compliment must be between 5 and 40 words. Do not use markdown titles or headers, just the text of the compliment."
     payload = {
         "contents": [{"parts": [{"text": "Generate a compliment for Shea."}]}],
@@ -317,7 +318,8 @@ async def generate_shea_compliment():
 
 async def generate_shea_insult():
     if not GEMINI_API_KEY: return "Error: Gemini API Key not configured."
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+    # FIXED: Switched to gemini-1.5-flash
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     system_prompt = "You are an insult generator. Create a single, funny, and passive-aggressive insult directed at 'Shea'. The insult must be between 5 and 40 words. Frame it as a backhanded compliment or a gentle, confusing dig. Do not use markdown titles or headers, just the text of the insult."
     payload = {
         "contents": [{"parts": [{"text": "Generate a passive-aggressive insult for Shea."}]}],
@@ -334,7 +336,8 @@ async def generate_shea_insult():
 
 async def generate_lyra_compliment():
     if not GEMINI_API_KEY: return "Error: Gemini API Key not configured."
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+    # FIXED: Switched to gemini-1.5-flash
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     system_prompt = "You are a compliment generator. Create a single, short, extremely corny, and awkward compliment about 'Lyra'. Use overly dramatic or slightly misplaced metaphors. The compliment must be between 5 and 40 words. Do not use markdown titles or headers, just the text of the compliment."
     payload = {
         "contents": [{"parts": [{"text": "Generate a corny and awkward compliment for Lyra."}]}],
@@ -351,7 +354,8 @@ async def generate_lyra_compliment():
 
 async def generate_miwa_compliment():
     if not GEMINI_API_KEY: return "Error: Gemini API Key not configured."
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+    # FIXED: Switched to gemini-1.5-flash
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     system_prompt = "You are a compliment generator. Create a single, short, and weirdly odd compliment about 'Miwa'. The compliment should be confusingly simple, like 'Miwa, you are like apples, I like apples, I think'. The compliment must be between 5 and 40 words. Do not use markdown titles or headers, just the text of the compliment."
     payload = {
         "contents": [{"parts": [{"text": "Generate a weirdly odd compliment for Miwa."}]}],
@@ -371,7 +375,8 @@ async def get_hangman_word():
     Calls the Gemini API to generate a single, SFW word for Hangman.
     """
     if not GEMINI_API_KEY: return None, "Error: Gemini API Key not configured."
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+    # FIXED: Switched to gemini-1.5-flash
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     
     system_prompt = "Generate a single, random, SFW (School/Work-Safe) word for a game of Hangman. The word should be between 6 and 12 letters long and must not be a proper noun. Only output the JSON object."
 
@@ -417,7 +422,8 @@ async def get_hangman_word():
 async def generate_chat_response(user_id, user_name, user_input):
     if not GEMINI_API_KEY: return "My brain is missing (API Key Error)."
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+    # FIXED: Switched to gemini-1.5-flash
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     
     # 1. Retrieve or Initialize History
     if user_id not in USER_CHAT_CONTEXTS:
@@ -522,9 +528,12 @@ async def send_scheduled_message():
 async def on_ready():
     # Add the new command group
     tree.add_command(stop_group)
-    await tree.sync()
+    
+    # CRITICAL FIX: Disable auto-sync to prevent Render boot loop
+    # await tree.sync()  <-- COMMENTED OUT TO SAVE CPU
+    
     print(f'Logged in as {client.user} (ID: {client.user.id})')
-    print('Bot is ready and running.')
+    print('Bot is ready and running. NOTE: Run /sync manually to update commands.')
 
     if not send_scheduled_message.is_running():
         send_scheduled_message.start()
@@ -577,6 +586,24 @@ def get_display_interval(interval_seconds: int) -> str:
 
 
 # --- Slash Commands ---
+
+# --- NEW: MANUAL SYNC COMMAND (Prevents Boot Loop) ---
+@tree.command(name="sync", description="Admin: Sync commands manually (Fixes Boot Loop).")
+async def sync_commands(interaction: discord.Interaction, password: str):
+    if password != "12344321":
+        await interaction.response.send_message("❌ Access Denied", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        # Re-add dynamic groups just in case
+        tree.add_command(stop_group) 
+        await tree.sync()
+        await interaction.followup.send("✅ **Commands Synced!** (You only need to do this when you change code).")
+        print("Commands synced manually.")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed to sync: {e}")
+
 
 @tree.command(name="manual", description="Schedule a fixed message for this channel.")
 @discord.app_commands.describe(message="The exact message to repeat.", interval_hours="The interval in hours (e.g., 2 or 0.5).")
