@@ -11,11 +11,7 @@ from typing import Dict, Set, List
 # --- Configuration ---
 # Load environment variables (set in Railway dashboard)
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY") # Changed from GEMINI to MISTRAL
-
-# Set your model here. Common free/cheap ones: "open-mistral-nemo", "mistral-tiny", "mistral-small-latest"
-# If "Devstral 2 2512" is a real model ID provided to you, paste it inside the quotes.
-MISTRAL_MODEL = "open-mistral-nemo" 
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # --- Bot Setup ---
 intents = discord.Intents.default()
@@ -23,7 +19,7 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
 
-# --- State Management ---
+# --- State Management (Refactored for Per-Channel) ---
 
 class BotState:
     """Stores the announcement state for a single channel."""
@@ -35,17 +31,22 @@ class BotState:
         self.is_automatic: bool = False
         self.ai_prompt: str = ""
         self.interval_seconds: int = 0
+        # NEW: Flag to override stack logic
         self.ignore_stack_logic: bool = False 
 
+# Global dictionary to hold all active channel states
+# Key: channel_id (int), Value: BotState object
 CHANNEL_STATES: Dict[int, BotState] = {}
 
 # --- Chat Mode State ---
 CHAT_MODE_ACTIVE = False
-# Key: user_id (int), Value: List of message history dicts for Mistral
+# Key: user_id (int), Value: List of message history dicts for Gemini
 USER_CHAT_CONTEXTS: Dict[int, List[Dict]] = {}
 
 
 # --- Hangman Game State ---
+
+# FIXED: Added 'r' before strings to handle backslashes correctly
 HANGMAN_PICS = [
     r"""
       +---+
@@ -125,12 +126,13 @@ class HangmanGame:
     def make_guess(self, guess: str):
         guess = guess.lower()
         if self.game_over or guess in self.guesses:
-            return 
+            return # Don't penalize for repeat guesses
 
         if len(guess) > 1: # Word guess
             if guess == self.word:
                 self.win = True
                 self.game_over = True
+                # Add all letters to guesses for display
                 for letter in self.word:
                     self.guesses.add(letter)
             else:
@@ -141,24 +143,32 @@ class HangmanGame:
             if guess not in self.word:
                 self.tries_left -= 1
 
+        # Check for win condition (all letters guessed)
         if all(letter in self.guesses for letter in self.word):
             self.win = True
             self.game_over = True
 
+        # Check for lose condition
         if self.tries_left <= 0:
             self.game_over = True
             self.win = False
 
     def get_display_message(self) -> str:
+        """Generates the text to display for the game state."""
+        
         if self.win:
             return f"🎉 **You win!** 🎉\nThe word was: **{self.word}**"
         
-        if self.game_over: 
+        if self.game_over: # And not self.win
             return f"💀 **You lose!** 💀\nThe word was: **{self.word}**\n{HANGMAN_PICS[-1]}"
 
+        # Game in progress
         display_word = " ".join([letter if letter in self.guesses else "＿" for letter in self.word])
+        
+        # Get guessed letters that are *not* in the word
         wrong_guesses = sorted([g for g in self.guesses if g not in self.word and len(g) == 1])
         guessed_display = f"Guessed: `{' '.join(wrong_guesses)}`" if wrong_guesses else "Guessed: (None yet)"
+
         art = HANGMAN_PICS[6 - self.tries_left]
         
         return (
@@ -170,34 +180,24 @@ class HangmanGame:
             f"Use `/hangman [guess]` to guess a letter or the whole word."
         )
 
+# Global dictionary for active hangman games
+# Key: channel_id (int), Value: HangmanGame object
 HANGMAN_GAMES: Dict[int, HangmanGame] = {}
 
 
-# --- AI Service Functions (MISTRAL API) ---
+# --- AI Service Functions ---
 
-async def fetch_mistral(session, payload):
-    """
-    Standardized fetch function for Mistral API.
-    """
-    if not MISTRAL_API_KEY:
-        return None, "Error: MISTRAL_API_KEY not configured."
-
-    url = "https://api.mistral.ai/v1/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {MISTRAL_API_KEY}",
-        "Accept": "application/json"
-    }
-
+# Helper function for exponential backoff
+async def fetch_with_backoff(session, url, payload):
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            async with session.post(url, headers=headers, json=payload) as response:
+            async with session.post(url, headers={'Content-Type': 'application/json'}, json=payload) as response:
                 if response.status == 200:
                     return await response.json(), None
                 elif response.status == 429: # Rate limit
                     wait_time = 2 ** attempt
-                    print(f"Mistral Rate limited. Retrying in {wait_time}s...")
+                    print(f"Rate limited. Retrying in {wait_time}s...")
                     await asyncio.sleep(wait_time)
                 else:
                     error_text = await response.text()
@@ -208,171 +208,216 @@ async def fetch_mistral(session, payload):
             print(f"Connection error. Retrying in {wait_time}s...")
             await asyncio.sleep(wait_time)
         except Exception as e:
-            print(f"Unexpected error: {e}")
+            print(f"An unexpected error occurred during API call: {e}")
             return None, f"An unexpected error occurred: {e}"
     
     return None, "Error: Failed to connect to AI service after multiple retries."
 
 
 async def generate_announcement_content(prompt):
+    """
+    Calls the Gemini API to generate the announcement message.
+    """
+    if not GEMINI_API_KEY: return "Error: Gemini API Key not configured."
+    # UPDATED to gemini-2.5-flash-preview-09-2025
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+    
     system_prompt = "You are a fun, engaging, and concise community announcer bot. Generate a short, relevant message based on the user's prompt. Do not use markdown titles or headers, just plain text."
     
     payload = {
-        "model": MISTRAL_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.7
+        "contents": [{"parts": [{"text": prompt}]}],
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
     }
 
     async with ClientSession() as session:
-        result, error = await fetch_mistral(session, payload)
+        result, error = await fetch_with_backoff(session, url, payload)
         
-        if error: return error
+        if error:
+            return error
             
         try:
-            return result['choices'][0]['message']['content']
-        except (KeyError, IndexError):
+            text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'AI failed to generate a response.')
+            return text
+        except (IndexError, KeyError, TypeError):
             return "Error: AI response was not in the expected format."
 
 
 async def parse_automatic_prompt(full_prompt):
     """
-    Uses Mistral's JSON mode to parse the prompt.
+    Uses Gemini's structured output to parse the message and interval from a single prompt.
     """
+    if not GEMINI_API_KEY: return None, "Error: Gemini API Key not configured."
+    # UPDATED to gemini-2.5-flash-preview-09-2025
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+    
     system_prompt = (
-        "You are a parser. Analyze the user's request. "
-        "Extract the 'announcement_prompt' and 'interval_seconds'. "
-        "Return a VALID JSON object. "
-        "If no interval is mentioned, default to 3600 seconds. "
-        "Example output: {\"announcement_prompt\": \"Say hello\", \"interval_seconds\": 60}"
+        "Analyze the user's full request. Extract the core announcement message/prompt and the time interval. "
+        "Convert the interval into total seconds. If no interval is found, default to 3600 seconds (1 hour)."
     )
 
+    schema = {
+        "type": "OBJECT",
+        "properties": {
+            "announcement_prompt": {
+                "type": "STRING",
+                "description": "The concise message or prompt to be used for the periodic announcement."
+            },
+            "interval_seconds": {
+                "type": "INTEGER",
+                "description": "The time interval extracted from the prompt, converted into total seconds. Must be at least 10 seconds."
+            }
+        },
+        "required": ["announcement_prompt", "interval_seconds"]
+    }
+
     payload = {
-        "model": MISTRAL_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": full_prompt}
-        ],
-        "response_format": {"type": "json_object"},
-        "temperature": 0.2 # Lower temperature for better structure
+        "contents": [{"parts": [{"text": full_prompt}]}],
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": schema
+        }
     }
 
     async with ClientSession() as session:
-        result, error = await fetch_mistral(session, payload)
+        result, error = await fetch_with_backoff(session, url, payload)
 
-        if error: return None, error
+        if error:
+            return None, error
 
         try:
-            content = result['choices'][0]['message']['content']
-            parsed_data = json.loads(content)
+            json_string = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '{}')
+            parsed_data = json.loads(json_string)
             
-            # Normalize keys just in case
-            if 'interval_seconds' not in parsed_data: parsed_data['interval_seconds'] = 3600
-            
-            # Ensure minimum interval
+            # Ensure interval is a minimum of 10 seconds
             if parsed_data.get('interval_seconds', 0) < 10:
                 parsed_data['interval_seconds'] = 10
                 
             return parsed_data, None
-        except (KeyError, IndexError, json.JSONDecodeError):
-            return None, "Error: AI parser response was not valid JSON."
+        except (IndexError, KeyError, TypeError, json.JSONDecodeError):
+            return None, "Error: AI parser response was not in the expected format."
 
 
 async def generate_shea_compliment():
-    system_prompt = "You are a compliment generator. Create a single, short, and weirdly specific compliment about 'Shea'. The compliment must be between 5 and 40 words. Just plain text."
+    if not GEMINI_API_KEY: return "Error: Gemini API Key not configured."
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+    system_prompt = "You are a compliment generator. Create a single, short, and weirdly specific compliment about 'Shea'. The compliment must be between 5 and 40 words. Do not use markdown titles or headers, just the text of the compliment."
     payload = {
-        "model": MISTRAL_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": "Generate a compliment for Shea."}
-        ]
+        "contents": [{"parts": [{"text": "Generate a compliment for Shea."}]}],
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
     }
     async with ClientSession() as session:
-        result, error = await fetch_mistral(session, payload)
+        result, error = await fetch_with_backoff(session, url, payload)
         if error: return error
-        return result['choices'][0]['message']['content']
+        try:
+            return result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'Shea is like a perfectly aged cheese—complex and delightful.')
+        except (IndexError, KeyError, TypeError):
+            return "Error: AI response was not in the expected format."
 
 
 async def generate_shea_insult():
-    system_prompt = "You are an insult generator. Create a single, funny, and passive-aggressive insult directed at 'Shea'. Between 5 and 40 words. Frame it as a backhanded compliment."
+    if not GEMINI_API_KEY: return "Error: Gemini API Key not configured."
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+    system_prompt = "You are an insult generator. Create a single, funny, and passive-aggressive insult directed at 'Shea'. The insult must be between 5 and 40 words. Frame it as a backhanded compliment or a gentle, confusing dig. Do not use markdown titles or headers, just the text of the insult."
     payload = {
-        "model": MISTRAL_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": "Generate a passive-aggressive insult for Shea."}
-        ]
+        "contents": [{"parts": [{"text": "Generate a passive-aggressive insult for Shea."}]}],
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
     }
     async with ClientSession() as session:
-        result, error = await fetch_mistral(session, payload)
+        result, error = await fetch_with_backoff(session, url, payload)
         if error: return error
-        return result['choices'][0]['message']['content']
+        try:
+            return result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'Shea, your ability to consistently not be the worst person in the room is truly inspiring.')
+        except (IndexError, KeyError, TypeError):
+            return "Error: AI response was not in the expected format."
 
 
 async def generate_lyra_compliment():
-    system_prompt = "You are a compliment generator. Create a single, short, extremely corny, and awkward compliment about 'Lyra'. Use overly dramatic metaphors. Between 5 and 40 words."
+    if not GEMINI_API_KEY: return "Error: Gemini API Key not configured."
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+    system_prompt = "You are a compliment generator. Create a single, short, extremely corny, and awkward compliment about 'Lyra'. Use overly dramatic or slightly misplaced metaphors. The compliment must be between 5 and 40 words. Do not use markdown titles or headers, just the text of the compliment."
     payload = {
-        "model": MISTRAL_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": "Generate a corny compliment for Lyra."}
-        ]
+        "contents": [{"parts": [{"text": "Generate a corny and awkward compliment for Lyra."}]}],
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
     }
     async with ClientSession() as session:
-        result, error = await fetch_mistral(session, payload)
+        result, error = await fetch_with_backoff(session, url, payload)
         if error: return error
-        return result['choices'][0]['message']['content']
+        try:
+            return result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'Lyra, your presence is like a single, magnificent, sparkly unicorn tear of joy.')
+        except (IndexError, KeyError, TypeError):
+            return "Error: AI response was not in the expected format."
 
 
 async def generate_miwa_compliment():
-    system_prompt = "You are a compliment generator. Create a single, short, and weirdly odd compliment about 'Miwa'. It should be confusingly simple. Between 5 and 40 words."
+    if not GEMINI_API_KEY: return "Error: Gemini API Key not configured."
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+    system_prompt = "You are a compliment generator. Create a single, short, and weirdly odd compliment about 'Miwa'. The compliment should be confusingly simple, like 'Miwa, you are like apples, I like apples, I think'. The compliment must be between 5 and 40 words. Do not use markdown titles or headers, just the text of the compliment."
     payload = {
-        "model": MISTRAL_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": "Generate a weird compliment for Miwa."}
-        ]
+        "contents": [{"parts": [{"text": "Generate a weirdly odd compliment for Miwa."}]}],
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
     }
     async with ClientSession() as session:
-        result, error = await fetch_mistral(session, payload)
+        result, error = await fetch_with_backoff(session, url, payload)
         if error: return error
-        return result['choices'][0]['message']['content']
+        try:
+            return result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'Miwa, your aura is the exact color of my favorite sock. This is good.')
+        except (IndexError, KeyError, TypeError):
+            return "Error: AI response was not in the expected format."
 
-
+# --- NEW: Hangman Word Generator ---
 async def get_hangman_word():
-    system_prompt = "Generate a single, random, SFW (School/Work-Safe) word for a game of Hangman. The word should be between 6 and 12 letters long and must not be a proper noun. Return a JSON object like {\"word\": \"example\"}."
+    """
+    Calls the Gemini API to generate a single, SFW word for Hangman.
+    """
+    if not GEMINI_API_KEY: return None, "Error: Gemini API Key not configured."
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+    
+    system_prompt = "Generate a single, random, SFW (School/Work-Safe) word for a game of Hangman. The word should be between 6 and 12 letters long and must not be a proper noun. Only output the JSON object."
+
+    schema = {
+        "type": "OBJECT",
+        "properties": {
+            "word": {
+                "type": "STRING",
+                "description": "A single SFW hangman word, 6-12 chars, no proper nouns."
+            }
+        },
+        "required": ["word"]
+    }
 
     payload = {
-        "model": MISTRAL_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": "Give me one hangman word."}
-        ],
-        "response_format": {"type": "json_object"}
+        "contents": [{"parts": [{"text": "Give me one hangman word."}]}],
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": schema
+        }
     }
 
     async with ClientSession() as session:
-        result, error = await fetch_mistral(session, payload)
+        result, error = await fetch_with_backoff(session, url, payload)
 
-        if error: return None, error
+        if error:
+            return None, error
 
         try:
-            content = result['choices'][0]['message']['content']
-            parsed_data = json.loads(content)
+            json_string = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '{}')
+            parsed_data = json.loads(json_string)
             word = parsed_data.get('word')
             
             if not word or not (6 <= len(word) <= 12) or not word.isalpha():
-                return "default", None 
+                return "default", None # Fallback
             
             return word.lower(), None
-        except (KeyError, IndexError, json.JSONDecodeError):
-            return "fallback", None
+        except (IndexError, KeyError, TypeError, json.JSONDecodeError):
+            return "fallback", None # Fallback
 
-
-# --- Chat Logic (Refactored for Mistral) ---
+# --- NEW: Chat Logic ---
 async def generate_chat_response(user_id, user_name, user_input):
-    if not MISTRAL_API_KEY: return "My brain is missing (API Key Error)."
+    if not GEMINI_API_KEY: return "My brain is missing (API Key Error)."
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
     
     # 1. Retrieve or Initialize History
     if user_id not in USER_CHAT_CONTEXTS:
@@ -381,15 +426,15 @@ async def generate_chat_response(user_id, user_name, user_input):
     history = USER_CHAT_CONTEXTS[user_id]
     
     # 2. Append User Message
-    # Mistral uses "role": "user" and "content": "text"
-    history.append({"role": "user", "content": user_input})
+    history.append({"role": "user", "parts": [{"text": user_input}]})
     
-    # Keep history manageable (last 10 messages)
+    # Keep history manageable (last 10 messages = 5 turns)
     if len(history) > 10:
         history = history[-10:]
         USER_CHAT_CONTEXTS[user_id] = history
 
     # 3. System Prompt (Persona)
+    # UPDATED: Added instructions to keep responses short and match user length.
     persona_prompt = (
         f"You are an 18-year-old girl. You are highly intelligent, very funny, and you are allowed to swear. "
         f"You are chatting with a user named {user_name} on Discord. "
@@ -398,41 +443,37 @@ async def generate_chat_response(user_id, user_name, user_input):
         "Keep it casual, use slang, and do not be robotic. Just hang out."
     )
 
-    # Insert System Prompt at the start of the temporary messages list for the API call
-    messages_to_send = [{"role": "system", "content": persona_prompt}] + history
-
     payload = {
-        "model": MISTRAL_MODEL,
-        "messages": messages_to_send,
-        "max_tokens": 150 # Limit output length
+        "contents": history,
+        "systemInstruction": {"parts": [{"text": persona_prompt}]},
     }
 
     async with ClientSession() as session:
-        result, error = await fetch_mistral(session, payload)
+        result, error = await fetch_with_backoff(session, url, payload)
         
         if error:
             return "I'm having a headache. (API Error)"
 
         try:
-            response_text = result['choices'][0]['message']['content']
+            response_text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
             
             if response_text:
                 # Add model response to history
-                # Mistral uses "assistant" for the bot role
-                history.append({"role": "assistant", "content": response_text})
-                USER_CHAT_CONTEXTS[user_id] = history
+                history.append({"role": "model", "parts": [{"text": response_text}]})
+                USER_CHAT_CONTEXTS[user_id] = history # Update global dict
                 return response_text
             else:
                 return "..."
                 
-        except (KeyError, IndexError):
+        except (IndexError, KeyError, TypeError):
             return "I don't know what to say."
 
 
-# --- Background Task ---
+# --- Background Task (Refactored) ---
 
 @tasks.loop(seconds=1)
 async def send_scheduled_message():
+    # Iterate over a copy of the items to allow for safe deletion
     for channel_id, state in list(CHANNEL_STATES.items()):
         
         if state.interval_seconds == 0:
@@ -441,11 +482,13 @@ async def send_scheduled_message():
         if time.time() - state.last_bot_send_time >= state.interval_seconds:
             
             # Anti-Stacking Logic
+            # If ignore_stack_logic is True, we SKIP this block
             if not state.ignore_stack_logic and state.last_channel_activity_time <= state.last_bot_send_time:
-                # print(f"Channel {channel_id} is idle. Skipping scheduled message.")
-                state.last_bot_send_time = time.time() 
+                print(f"Channel {channel_id} is idle. Skipping scheduled message.")
+                state.last_bot_send_time = time.time() # Reset timer to prevent spam
                 continue
             
+            # Debug print for override
             if state.ignore_stack_logic:
                 print(f"Force sending message to {channel_id} (Stack Logic Ignored)")
 
@@ -477,10 +520,11 @@ async def send_scheduled_message():
 
 @client.event
 async def on_ready():
+    # Add the new command group
     tree.add_command(stop_group)
     await tree.sync()
     print(f'Logged in as {client.user} (ID: {client.user.id})')
-    print('Bot is ready and running with Mistral API.')
+    print('Bot is ready and running.')
 
     if not send_scheduled_message.is_running():
         send_scheduled_message.start()
@@ -491,27 +535,39 @@ async def on_message(message):
     if message.author == client.user:
         return
 
+    # Update channel activity time if it has a schedule
     if message.channel.id in CHANNEL_STATES:
         CHANNEL_STATES[message.channel.id].last_channel_activity_time = time.time()
     
-    # --- Chat Mode Trigger ---
+    # --- NEW: Chat Mode Trigger ---
     if CHAT_MODE_ACTIVE:
         is_mentioned = client.user in message.mentions
         is_reply = (message.reference and message.reference.resolved and 
                     message.reference.resolved.author == client.user)
         
         if is_mentioned or is_reply:
+            # Show typing indicator while generating
             async with message.channel.typing():
+                # Clean content: Remove bot mention from text to not confuse AI
                 clean_text = message.content.replace(f'<@{client.user.id}>', '').strip()
-                if not clean_text: clean_text = "Hello!" 
+                if not clean_text: clean_text = "Hello!" # Handle empty ping
                 
                 response = await generate_chat_response(message.author.id, message.author.name, clean_text)
                 await message.reply(response)
-            return 
+            return # Don't process other logic if we chatted
+
+    # Check if this is a guess for a hangman game
+    if message.channel.id in HANGMAN_GAMES:
+        # We handle guesses via slash command now, so this can be ignored
+        pass
+    
+    # This function is needed if you use hybrid commands, but not for slash-only
+    # await client.process_commands(message) 
 
 
 # --- Helper Function ---
 def get_display_interval(interval_seconds: int) -> str:
+    """Converts seconds to a readable H/M/S string."""
     if interval_seconds >= 3600 and interval_seconds % 3600 == 0:
         return f"{interval_seconds // 3600} hours"
     elif interval_seconds >= 60 and interval_seconds % 60 == 0:
@@ -534,28 +590,30 @@ async def manual_schedule(interaction: discord.Interaction, message: str, interv
         await interaction.response.send_message("The interval is too short (minimum 10 seconds).", ephemeral=True)
         return
 
+    # Get existing state or create a new one
     state = CHANNEL_STATES.get(interaction.channel_id, BotState(interaction.channel_id))
     
     state.interval_seconds = interval_seconds
     state.scheduled_message_content = message
     state.is_automatic = False
-    state.ignore_stack_logic = False
+    state.ignore_stack_logic = False # Default behavior
     state.last_bot_send_time = time.time()
     state.last_channel_activity_time = time.time()
     
-    CHANNEL_STATES[interaction.channel_id] = state 
+    CHANNEL_STATES[interaction.channel_id] = state # Add/update in global dict
     
     await interaction.response.send_message(f"✅ **Manual Scheduled!** Interval: **{interval_hours} hours**.", ephemeral=False)
 
 @tree.command(name="automatic", description="Schedule an AI message for this channel (e.g., 'Say 'bark' every 10 seconds').")
 @discord.app_commands.describe(full_prompt="The message prompt AND interval (e.g., 'Say a fun fact every 2 hours').")
 async def automatic_schedule(interaction: discord.Interaction, full_prompt: str):
-    if not MISTRAL_API_KEY:
-        await interaction.response.send_message("❌ **Error:** `MISTRAL_API_KEY` is missing.", ephemeral=True)
+    if not GEMINI_API_KEY:
+        await interaction.response.send_message("❌ **Error:** `GEMINI_API_KEY` is missing.", ephemeral=True)
         return
         
     await interaction.response.defer(ephemeral=True)
     
+    # Use Gemini to parse the prompt for message and interval
     parsed_data, error = await parse_automatic_prompt(full_prompt)
 
     if error:
@@ -569,12 +627,13 @@ async def automatic_schedule(interaction: discord.Interaction, full_prompt: str)
         await interaction.followup.send("❌ **Error:** Could not determine a clear message or the interval was too small (minimum 10 seconds). Try: `/automatic Say something fun every 30 minutes`", ephemeral=True)
         return
 
+    # Set the state based on parsed results
     state = CHANNEL_STATES.get(interaction.channel_id, BotState(interaction.channel_id))
     
     state.interval_seconds = interval_seconds
     state.ai_prompt = ai_prompt
     state.is_automatic = True
-    state.ignore_stack_logic = False 
+    state.ignore_stack_logic = False # Default behavior
     state.last_bot_send_time = time.time()
     state.last_channel_activity_time = time.time()
     
@@ -583,12 +642,13 @@ async def automatic_schedule(interaction: discord.Interaction, full_prompt: str)
     display_interval = get_display_interval(interval_seconds)
     
     confirmation_message = (
-        f"🤖 **Automatic Scheduled!** (Model: {MISTRAL_MODEL})\n"
+        f"🤖 **Automatic Scheduled!**\n"
         f"**Task:** Generate a message based on the prompt: '{ai_prompt}'\n"
         f"**Interval:** **{display_interval}**"
     )
     await interaction.followup.send(confirmation_message, ephemeral=False)
 
+# --- NEW: Ignore Stack Logic Command ---
 @tree.command(name="ignore_stack_logic", description="ADMIN: Forces 'Hi' every 10s, ignoring idle checks.")
 @discord.app_commands.describe(password="Enter the admin password.")
 async def ignore_stack_logic(interaction: discord.Interaction, password: str):
@@ -596,12 +656,16 @@ async def ignore_stack_logic(interaction: discord.Interaction, password: str):
         await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
         return
 
+    # Get existing state or create a new one
     state = CHANNEL_STATES.get(interaction.channel_id, BotState(interaction.channel_id))
     
     state.interval_seconds = 10
     state.scheduled_message_content = "Hi"
     state.is_automatic = False
-    state.ignore_stack_logic = True 
+    state.ignore_stack_logic = True # Enable the override
+    
+    # CRITICAL FIX: Set the last send time to the past (-15 seconds)
+    # This tricks the bot into sending the FIRST message immediately.
     state.last_bot_send_time = time.time() - 15 
     state.last_channel_activity_time = time.time() 
     
@@ -609,12 +673,14 @@ async def ignore_stack_logic(interaction: discord.Interaction, password: str):
     
     await interaction.response.send_message("⚠️ **Override Enabled:** Sending 'Hi' every 10 seconds. Starting immediately.", ephemeral=False)
 
+# --- NEW: Chat Mode Command ---
 @tree.command(name="chat", description="Enable/Disable the 18yo Chat Persona.")
 @discord.app_commands.describe(action="Start or Stop", password="Password required.")
 @discord.app_commands.choices(action=[
     discord.app_commands.Choice(name="Start", value="start"),
     discord.app_commands.Choice(name="Stop", value="stop")
 ])
+# FIXED: Changed discord.Choice[str] to str
 async def chat_mode_toggle(interaction: discord.Interaction, action: str, password: str):
     global CHAT_MODE_ACTIVE
     
@@ -627,10 +693,11 @@ async def chat_mode_toggle(interaction: discord.Interaction, action: str, passwo
         await interaction.response.send_message("🟢 **Chat Mode Activated!** She is awake. (Ping her to talk)", ephemeral=False)
     else:
         CHAT_MODE_ACTIVE = False
-        USER_CHAT_CONTEXTS.clear()
+        USER_CHAT_CONTEXTS.clear() # Clear memory on stop
         await interaction.response.send_message("🔴 **Chat Mode Deactivated.** She is asleep.", ephemeral=False)
 
 
+# --- NEW: Global Announcement Command ---
 @tree.command(name="announcement", description="Send an announcement to a specific channel ID.")
 @discord.app_commands.describe(channel_id="The ID of the channel to send to", message="The text to send", password="Password required.")
 async def global_announcement(interaction: discord.Interaction, channel_id: str, message: str, password: str):
@@ -639,10 +706,12 @@ async def global_announcement(interaction: discord.Interaction, channel_id: str,
         return
 
     try:
+        # Convert ID to int just in case
         target_id = int(channel_id)
         target_channel = client.get_channel(target_id)
         
         if not target_channel:
+             # Try to fetch if not in cache (rare but possible)
             try:
                 target_channel = await client.fetch_channel(target_id)
             except:
@@ -675,6 +744,7 @@ async def stop_channel(interaction: discord.Interaction):
 async def stop_all(interaction: discord.Interaction):
     CHANNEL_STATES.clear()
     await interaction.response.send_message("🛑 **All announcements have been stopped and cleared.**", ephemeral=False)
+# Note: The old /stop command is removed, and this group is added in on_ready
 
 @tree.command(name="status", description="Check the schedule status for this channel.")
 async def get_status(interaction: discord.Interaction):
@@ -688,8 +758,10 @@ async def get_status(interaction: discord.Interaction):
     mode = "Automatic (AI)" if state.is_automatic else "Manual (Fixed)"
     time_since_send = time.time() - state.last_bot_send_time
     
+    # Modified status check for ignore_stack_logic
     is_waiting = "No (Ignored)" if state.ignore_stack_logic else ("Yes (Awaiting chat activity)" if state.last_channel_activity_time <= state.last_bot_send_time else "No")
     
+    # Calculate time until next send
     time_until_next = state.interval_seconds - time_since_send
     time_until_next = max(0, time_until_next)
 
@@ -706,6 +778,7 @@ async def get_status(interaction: discord.Interaction):
     )
     await interaction.response.send_message(response_text, ephemeral=True)
 
+# --- NEW: /test Command ---
 @tree.command(name="test", description="Send the next scheduled announcement for this channel immediately (one-time).")
 async def test_schedule(interaction: discord.Interaction):
     state = CHANNEL_STATES.get(interaction.channel_id)
@@ -714,7 +787,7 @@ async def test_schedule(interaction: discord.Interaction):
         await interaction.response.send_message("No schedule running for this channel to test.", ephemeral=True)
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer(ephemeral=True) # Acknowledge, but hide "thinking"
 
     message_to_send = ""
     if state.is_automatic:
@@ -723,18 +796,23 @@ async def test_schedule(interaction: discord.Interaction):
         message_to_send = state.scheduled_message_content
     
     try:
+        # Send the test message to the channel
         await interaction.channel.send(f"**[Test Announcement]** {message_to_send}")
+        # Send a private confirmation to the user
         await interaction.followup.send("✅ Test message sent!", ephemeral=True)
     except discord.Forbidden:
         await interaction.followup.send("❌ Error: Missing permissions to send message to this channel.", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"❌ An error occurred: {e}", ephemeral=True)
+    
+    # CRITICAL: We do NOT update state.last_bot_send_time
+    # This ensures the original schedule is not affected.
 
 
 @tree.command(name="shea", description="Gives Shea a random, weirdly specific compliment.")
 async def compliment_shea(interaction: discord.Interaction):
-    if not MISTRAL_API_KEY:
-        await interaction.response.send_message("❌ **Error:** `MISTRAL_API_KEY` is missing.", ephemeral=True)
+    if not GEMINI_API_KEY:
+        await interaction.response.send_message("❌ **Error:** `GEMINI_API_KEY` is missing.", ephemeral=True)
         return
         
     await interaction.response.defer(ephemeral=False)
@@ -747,8 +825,8 @@ async def compliment_shea(interaction: discord.Interaction):
 
 @tree.command(name="sheainsult", description="Insults Shea in a funny, passive-aggressive way.")
 async def insult_shea(interaction: discord.Interaction):
-    if not MISTRAL_API_KEY:
-        await interaction.response.send_message("❌ **Error:** `MISTRAL_API_KEY` is missing.", ephemeral=True)
+    if not GEMINI_API_KEY:
+        await interaction.response.send_message("❌ **Error:** `GEMINI_API_KEY` is missing.", ephemeral=True)
         return
         
     await interaction.response.defer(ephemeral=False)
@@ -761,8 +839,8 @@ async def insult_shea(interaction: discord.Interaction):
         
 @tree.command(name="lyra", description="Gives Lyra a random, corny and awkward compliment.")
 async def compliment_lyra(interaction: discord.Interaction):
-    if not MISTRAL_API_KEY:
-        await interaction.response.send_message("❌ **Error:** `MISTRAL_API_KEY` is missing.", ephemeral=True)
+    if not GEMINI_API_KEY:
+        await interaction.response.send_message("❌ **Error:** `GEMINI_API_KEY` is missing.", ephemeral=True)
         return
         
     await interaction.response.defer(ephemeral=False)
@@ -775,8 +853,8 @@ async def compliment_lyra(interaction: discord.Interaction):
 
 @tree.command(name="miwa", description="Gives Miwa a random, weirdly odd compliment.")
 async def compliment_miwa(interaction: discord.Interaction):
-    if not MISTRAL_API_KEY:
-        await interaction.response.send_message("❌ **Error:** `MISTRAL_API_KEY` is missing.", ephemeral=True)
+    if not GEMINI_API_KEY:
+        await interaction.response.send_message("❌ **Error:** `GEMINI_API_KEY` is missing.", ephemeral=True)
         return
         
     await interaction.response.defer(ephemeral=False)
@@ -788,6 +866,7 @@ async def compliment_miwa(interaction: discord.Interaction):
         await interaction.followup.send(f"🍎 An oddly specific message for Miwa: {compliment}")
 
 
+# --- NEW: /hangman Command ---
 @tree.command(name="hangman", description="Start or play a game of Hangman.")
 @discord.app_commands.describe(guess="Guess a letter or the whole word.")
 async def hangman(interaction: discord.Interaction, guess: str = None):
@@ -796,11 +875,11 @@ async def hangman(interaction: discord.Interaction, guess: str = None):
 
     if not game and not guess:
         # Start a new game
-        if not MISTRAL_API_KEY:
-            await interaction.response.send_message("❌ **Error:** `MISTRAL_API_KEY` is missing, cannot get a word.", ephemeral=True)
+        if not GEMINI_API_KEY:
+            await interaction.response.send_message("❌ **Error:** `GEMINI_API_KEY` is missing, cannot get a word.", ephemeral=True)
             return
             
-        await interaction.response.defer(ephemeral=False)
+        await interaction.response.defer(ephemeral=False) # Defer publicly
         
         word, error = await get_hangman_word()
         if error:
@@ -814,29 +893,36 @@ async def hangman(interaction: discord.Interaction, guess: str = None):
         return
 
     if not game and guess:
+        # Trying to guess without a game
         await interaction.response.send_message("No game is running! Start one with `/hangman`.", ephemeral=True)
         return
 
     if game and not guess:
+        # Trying to start a game mid-game
         await interaction.response.send_message("A game is already in progress in this channel!", ephemeral=True)
         return
 
     if game and guess:
+        # Making a guess
         if not game.message_id:
             await interaction.response.send_message("Game state is broken, please start a new game with `/hangman`.", ephemeral=True)
             if channel_id in HANGMAN_GAMES: del HANGMAN_GAMES[channel_id]
             return
             
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True) # Defer privately for the guesser
         
         game.make_guess(guess)
         
         try:
+            # Fetch the original game message
             message = await interaction.channel.fetch_message(game.message_id)
+            # Edit the message with the new state
             await message.edit(content=game.get_display_message())
+            # Send a silent confirmation to the guesser
             await interaction.followup.send(f"You guessed: `{guess}`", ephemeral=True)
             
         except discord.NotFound:
+            # Message was deleted
             await interaction.followup.send("The game message was deleted! Game over.", ephemeral=True)
             if channel_id in HANGMAN_GAMES: del HANGMAN_GAMES[channel_id]
         except Exception as e:
@@ -844,6 +930,7 @@ async def hangman(interaction: discord.Interaction, guess: str = None):
             await interaction.followup.send(f"Error updating game: {e}", ephemeral=True)
 
         if game.game_over:
+            # Clean up the finished game
             if channel_id in HANGMAN_GAMES:
                 del HANGMAN_GAMES[channel_id]
         return
@@ -852,8 +939,10 @@ async def hangman(interaction: discord.Interaction, guess: str = None):
 # --- Main Entry Point ---
 
 if __name__ == '__main__':
+    # 1. Start the keep-alive web server in the background
     start_server_thread()
     
+    # 2. Start the Discord bot
     if DISCORD_BOT_TOKEN:
         try:
             client.run(DISCORD_BOT_TOKEN)
