@@ -22,7 +22,6 @@ ALLOWED_GIF_ROLES = [
     1371466080366760064,
     1376303683599335434
 ]
-BROKE_GIF_LINK = "https://tenor.com/view/you%27re-broke-broke-brokie-andrew-tate-tate-gif-13383070538022521939"
 
 TARGET_LOG_SERVER_ID = 1371466080299778138
 TARGET_ADMIN_USER_ID = 748448138997530684
@@ -30,7 +29,7 @@ TARGET_ADMIN_USER_ID = 748448138997530684
 # --- Bot Setup ---
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True # Required to check roles for the GIF filter
+intents.members = True # Required for checking roles for GIF deletion
 client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
 
@@ -46,7 +45,7 @@ class BotState:
         self.is_automatic: bool = False
         self.ai_prompt: str = ""
         self.interval_seconds: int = 0
-        # Flag to override stack logic
+        # NEW: Flag to override stack logic
         self.ignore_stack_logic: bool = False 
 
 # Global dictionary to hold all active channel states
@@ -61,6 +60,7 @@ USER_CHAT_CONTEXTS: Dict[int, List[Dict]] = {}
 
 # --- Hangman Game State ---
 
+# FIXED: Added 'r' before strings to handle backslashes correctly
 HANGMAN_PICS = [
     r"""
       +---+
@@ -229,7 +229,11 @@ async def fetch_with_backoff(session, url, payload):
 
 
 async def generate_announcement_content(prompt):
+    """
+    Calls the Gemini API to generate the announcement message.
+    """
     if not GEMINI_API_KEY: return "Error: Gemini API Key not configured."
+    # UPDATED to gemini-2.5-flash-preview-09-2025
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
     
     system_prompt = "You are a fun, engaging, and concise community announcer bot. Generate a short, relevant message based on the user's prompt. Do not use markdown titles or headers, just plain text."
@@ -253,7 +257,11 @@ async def generate_announcement_content(prompt):
 
 
 async def parse_automatic_prompt(full_prompt):
+    """
+    Uses Gemini's structured output to parse the message and interval from a single prompt.
+    """
     if not GEMINI_API_KEY: return None, "Error: Gemini API Key not configured."
+    # UPDATED to gemini-2.5-flash-preview-09-2025
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
     
     system_prompt = (
@@ -354,7 +362,12 @@ async def generate_lyra_compliment():
         except (IndexError, KeyError, TypeError):
             return "Error: AI response was not in the expected format."
 
+
+# --- NEW: Hangman Word Generator ---
 async def get_hangman_word():
+    """
+    Calls the Gemini API to generate a single, SFW word for Hangman.
+    """
     if not GEMINI_API_KEY: return None, "Error: Gemini API Key not configured."
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
     
@@ -398,7 +411,7 @@ async def get_hangman_word():
         except (IndexError, KeyError, TypeError, json.JSONDecodeError):
             return "fallback", None # Fallback
 
-# --- Chat Logic ---
+# --- NEW: Chat Logic ---
 async def generate_chat_response(user_id, user_name, user_input):
     if not GEMINI_API_KEY: return "My brain is missing (API Key Error)."
     
@@ -419,6 +432,7 @@ async def generate_chat_response(user_id, user_name, user_input):
         USER_CHAT_CONTEXTS[user_id] = history
 
     # 3. System Prompt (Persona)
+    # UPDATED: Added instructions to keep responses short and match user length.
     persona_prompt = (
         f"You are an 18-year-old girl. You are highly intelligent, very funny, and you are allowed to swear. "
         f"You are chatting with a user named {user_name} on Discord. "
@@ -442,8 +456,9 @@ async def generate_chat_response(user_id, user_name, user_input):
             response_text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
             
             if response_text:
+                # Add model response to history
                 history.append({"role": "model", "parts": [{"text": response_text}]})
-                USER_CHAT_CONTEXTS[user_id] = history
+                USER_CHAT_CONTEXTS[user_id] = history # Update global dict
                 return response_text
             else:
                 return "..."
@@ -452,7 +467,7 @@ async def generate_chat_response(user_id, user_name, user_input):
             return "I don't know what to say."
 
 
-# --- Background Task ---
+# --- Background Task (Refactored) ---
 
 @tasks.loop(seconds=1)
 async def send_scheduled_message():
@@ -465,11 +480,13 @@ async def send_scheduled_message():
         if time.time() - state.last_bot_send_time >= state.interval_seconds:
             
             # Anti-Stacking Logic
+            # If ignore_stack_logic is True, we SKIP this block
             if not state.ignore_stack_logic and state.last_channel_activity_time <= state.last_bot_send_time:
                 print(f"Channel {channel_id} is idle. Skipping scheduled message.")
                 state.last_bot_send_time = time.time() # Reset timer to prevent spam
                 continue
             
+            # Debug print for override
             if state.ignore_stack_logic:
                 print(f"Force sending message to {channel_id} (Stack Logic Ignored)")
 
@@ -501,6 +518,7 @@ async def send_scheduled_message():
 
 @client.event
 async def on_ready():
+    # Add the new command group
     tree.add_command(stop_group)
     await tree.sync()
     print(f'Logged in as {client.user} (ID: {client.user.id})')
@@ -512,9 +530,14 @@ async def on_ready():
 
 @client.event
 async def on_message_delete(message):
-    # Log deleted messages from specific server to specific user
+    """
+    Logs deleted messages and GIFs from the specific server and DMs them to the specified admin.
+    """
+    # Only target the specific server
     if message.guild is None or message.guild.id != TARGET_LOG_SERVER_ID:
         return
+        
+    # Ignore bot deletions to prevent loops or spam
     if message.author.bot:
         return
 
@@ -526,17 +549,19 @@ async def on_message_delete(message):
         if attachment.filename.lower().endswith(".gif") or (attachment.content_type and "gif" in attachment.content_type):
             gif_urls.append(attachment.url)
 
-    # If it was just a picture (not a gif) and had no text, ignore it
+    # If it was just a regular picture/file (not a gif) and had no text, ignore it
     if not text_content and not gif_urls:
         return
 
     try:
+        # Fetch the user to DM (teleostwind)
         target_user = client.get_user(TARGET_ADMIN_USER_ID)
         if not target_user:
             target_user = await client.fetch_user(TARGET_ADMIN_USER_ID)
 
         dm_channel = await target_user.create_dm()
 
+        # Build the alert message
         log_text = f"🗑️ **Deleted Message Alert** in **{message.guild.name}** -> #{message.channel.name}\n"
         log_text += f"**Author:** {message.author.mention} (`{message.author.id}`)\n\n"
         
@@ -554,49 +579,63 @@ async def on_message(message):
     if message.author == client.user:
         return
 
-    # --- GIF Filter (Integrated from Bot 2) ---
+    # --- GIF Block Filter (Merged from Bot 2) ---
+    # First, verify the author is an actual Member in a Server (not DMing the bot)
     if isinstance(message.author, discord.Member):
+        # Check if the user has any of the allowed roles
         has_allowed_role = any(role.id in ALLOWED_GIF_ROLES for role in message.author.roles)
         
         if not has_allowed_role:
             content_lower = message.content.lower()
             is_gif = False
             
+            # Look for common GIF domains and extensions in the text
             if "tenor.com/view" in content_lower or "giphy.com/gifs" in content_lower or ".gif" in content_lower:
                 is_gif = True
                 
+            # If no link was found, check if they uploaded a GIF file directly
             if not is_gif:
                 for attachment in message.attachments:
                     if attachment.filename.lower().endswith(".gif") or (attachment.content_type and "gif" in attachment.content_type):
                         is_gif = True
                         break
             
+            # If a GIF is detected, delete it (REMOVED: sending the Andrew Tate GIF)
             if is_gif:
                 try:
                     await message.delete()
-                    await message.channel.send(f"{message.author.mention} {BROKE_GIF_LINK}")
                 except discord.Forbidden:
-                    pass
-                return # Stop processing anything else for this deleted message
+                    pass # Fails safely if bot lacks permission
+                return # Stop processing so chat logic isn't run for deleted message
 
     # Update channel activity time if it has a schedule
     if message.channel.id in CHANNEL_STATES:
         CHANNEL_STATES[message.channel.id].last_channel_activity_time = time.time()
     
-    # --- Chat Mode Trigger ---
+    # --- NEW: Chat Mode Trigger ---
     if CHAT_MODE_ACTIVE:
         is_mentioned = client.user in message.mentions
         is_reply = (message.reference and message.reference.resolved and 
                     message.reference.resolved.author == client.user)
         
         if is_mentioned or is_reply:
+            # Show typing indicator while generating
             async with message.channel.typing():
+                # Clean content: Remove bot mention from text to not confuse AI
                 clean_text = message.content.replace(f'<@{client.user.id}>', '').strip()
-                if not clean_text: clean_text = "Hello!" 
+                if not clean_text: clean_text = "Hello!" # Handle empty ping
                 
                 response = await generate_chat_response(message.author.id, message.author.name, clean_text)
                 await message.reply(response)
-            return
+            return # Don't process other logic if we chatted
+
+    # Check if this is a guess for a hangman game
+    if message.channel.id in HANGMAN_GAMES:
+        # We handle guesses via slash command now, so this can be ignored
+        pass
+    
+    # This function is needed if you use hybrid commands, but not for slash-only
+    # await client.process_commands(message) 
 
 
 # --- Helper Function ---
@@ -624,16 +663,17 @@ async def manual_schedule(interaction: discord.Interaction, message: str, interv
         await interaction.response.send_message("The interval is too short (minimum 10 seconds).", ephemeral=True)
         return
 
+    # Get existing state or create a new one
     state = CHANNEL_STATES.get(interaction.channel_id, BotState(interaction.channel_id))
     
     state.interval_seconds = interval_seconds
     state.scheduled_message_content = message
     state.is_automatic = False
-    state.ignore_stack_logic = False
+    state.ignore_stack_logic = False # Default behavior
     state.last_bot_send_time = time.time()
     state.last_channel_activity_time = time.time()
     
-    CHANNEL_STATES[interaction.channel_id] = state 
+    CHANNEL_STATES[interaction.channel_id] = state # Add/update in global dict
     
     await interaction.response.send_message(f"✅ **Manual Scheduled!** Interval: **{interval_hours} hours**.", ephemeral=False)
 
@@ -646,6 +686,7 @@ async def automatic_schedule(interaction: discord.Interaction, full_prompt: str)
         
     await interaction.response.defer(ephemeral=True)
     
+    # Use Gemini to parse the prompt for message and interval
     parsed_data, error = await parse_automatic_prompt(full_prompt)
 
     if error:
@@ -656,15 +697,16 @@ async def automatic_schedule(interaction: discord.Interaction, full_prompt: str)
     ai_prompt = parsed_data.get('announcement_prompt')
     
     if not ai_prompt or interval_seconds < 10:
-        await interaction.followup.send("❌ **Error:** Could not determine a clear message or the interval was too small. Try: `/automatic Say something fun every 30 minutes`", ephemeral=True)
+        await interaction.followup.send("❌ **Error:** Could not determine a clear message or the interval was too small (minimum 10 seconds). Try: `/automatic Say something fun every 30 minutes`", ephemeral=True)
         return
 
+    # Set the state based on parsed results
     state = CHANNEL_STATES.get(interaction.channel_id, BotState(interaction.channel_id))
     
     state.interval_seconds = interval_seconds
     state.ai_prompt = ai_prompt
     state.is_automatic = True
-    state.ignore_stack_logic = False
+    state.ignore_stack_logic = False # Default behavior
     state.last_bot_send_time = time.time()
     state.last_channel_activity_time = time.time()
     
@@ -679,6 +721,7 @@ async def automatic_schedule(interaction: discord.Interaction, full_prompt: str)
     )
     await interaction.followup.send(confirmation_message, ephemeral=False)
 
+# --- NEW: Ignore Stack Logic Command ---
 @tree.command(name="ignore_stack_logic", description="ADMIN: Forces 'Hi' every 10s, ignoring idle checks.")
 @discord.app_commands.describe(password="Enter the admin password.")
 async def ignore_stack_logic(interaction: discord.Interaction, password: str):
@@ -686,13 +729,16 @@ async def ignore_stack_logic(interaction: discord.Interaction, password: str):
         await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
         return
 
+    # Get existing state or create a new one
     state = CHANNEL_STATES.get(interaction.channel_id, BotState(interaction.channel_id))
     
     state.interval_seconds = 10
     state.scheduled_message_content = "Hi"
     state.is_automatic = False
-    state.ignore_stack_logic = True
+    state.ignore_stack_logic = True # Enable the override
     
+    # CRITICAL FIX: Set the last send time to the past (-15 seconds)
+    # This tricks the bot into sending the FIRST message immediately.
     state.last_bot_send_time = time.time() - 15 
     state.last_channel_activity_time = time.time() 
     
@@ -700,12 +746,14 @@ async def ignore_stack_logic(interaction: discord.Interaction, password: str):
     
     await interaction.response.send_message("⚠️ **Override Enabled:** Sending 'Hi' every 10 seconds. Starting immediately.", ephemeral=False)
 
+# --- NEW: Chat Mode Command ---
 @tree.command(name="chat", description="Enable/Disable the 18yo Chat Persona.")
 @discord.app_commands.describe(action="Start or Stop", password="Password required.")
 @discord.app_commands.choices(action=[
     discord.app_commands.Choice(name="Start", value="start"),
     discord.app_commands.Choice(name="Stop", value="stop")
 ])
+# FIXED: Changed discord.Choice[str] to str
 async def chat_mode_toggle(interaction: discord.Interaction, action: str, password: str):
     global CHAT_MODE_ACTIVE
     
@@ -718,9 +766,11 @@ async def chat_mode_toggle(interaction: discord.Interaction, action: str, passwo
         await interaction.response.send_message("🟢 **Chat Mode Activated!** She is awake. (Ping her to talk)", ephemeral=False)
     else:
         CHAT_MODE_ACTIVE = False
-        USER_CHAT_CONTEXTS.clear()
+        USER_CHAT_CONTEXTS.clear() # Clear memory on stop
         await interaction.response.send_message("🔴 **Chat Mode Deactivated.** She is asleep.", ephemeral=False)
 
+
+# --- NEW: Global Announcement Command ---
 @tree.command(name="announcement", description="Send an announcement to a specific channel ID.")
 @discord.app_commands.describe(channel_id="The ID of the channel to send to", message="The text to send", password="Password required.")
 async def global_announcement(interaction: discord.Interaction, channel_id: str, message: str, password: str):
@@ -729,10 +779,12 @@ async def global_announcement(interaction: discord.Interaction, channel_id: str,
         return
 
     try:
+        # Convert ID to int just in case
         target_id = int(channel_id)
         target_channel = client.get_channel(target_id)
         
         if not target_channel:
+             # Try to fetch if not in cache (rare but possible)
             try:
                 target_channel = await client.fetch_channel(target_id)
             except:
@@ -750,7 +802,7 @@ async def global_announcement(interaction: discord.Interaction, channel_id: str,
         await interaction.response.send_message(f"❌ **Error:** {e}", ephemeral=True)
 
 
-# --- Stop Command Group ---
+# --- NEW: Stop Command Group ---
 stop_group = discord.app_commands.Group(name="stop", description="Stop scheduled announcements.")
 
 @stop_group.command(name="channel", description="Stop the schedule for this channel only.")
@@ -765,6 +817,7 @@ async def stop_channel(interaction: discord.Interaction):
 async def stop_all(interaction: discord.Interaction):
     CHANNEL_STATES.clear()
     await interaction.response.send_message("🛑 **All announcements have been stopped and cleared.**", ephemeral=False)
+# Note: The old /stop command is removed, and this group is added in on_ready
 
 @tree.command(name="status", description="Check the schedule status for this channel.")
 async def get_status(interaction: discord.Interaction):
@@ -778,8 +831,10 @@ async def get_status(interaction: discord.Interaction):
     mode = "Automatic (AI)" if state.is_automatic else "Manual (Fixed)"
     time_since_send = time.time() - state.last_bot_send_time
     
+    # Modified status check for ignore_stack_logic
     is_waiting = "No (Ignored)" if state.ignore_stack_logic else ("Yes (Awaiting chat activity)" if state.last_channel_activity_time <= state.last_bot_send_time else "No")
     
+    # Calculate time until next send
     time_until_next = state.interval_seconds - time_since_send
     time_until_next = max(0, time_until_next)
 
@@ -796,7 +851,7 @@ async def get_status(interaction: discord.Interaction):
     )
     await interaction.response.send_message(response_text, ephemeral=True)
 
-
+# --- NEW: /test Command ---
 @tree.command(name="test", description="Send the next scheduled announcement for this channel immediately (one-time).")
 async def test_schedule(interaction: discord.Interaction):
     state = CHANNEL_STATES.get(interaction.channel_id)
@@ -805,7 +860,7 @@ async def test_schedule(interaction: discord.Interaction):
         await interaction.response.send_message("No schedule running for this channel to test.", ephemeral=True)
         return
 
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer(ephemeral=True) # Acknowledge, but hide "thinking"
 
     message_to_send = ""
     if state.is_automatic:
@@ -814,12 +869,17 @@ async def test_schedule(interaction: discord.Interaction):
         message_to_send = state.scheduled_message_content
     
     try:
+        # Send the test message to the channel
         await interaction.channel.send(f"**[Test Announcement]** {message_to_send}")
+        # Send a private confirmation to the user
         await interaction.followup.send("✅ Test message sent!", ephemeral=True)
     except discord.Forbidden:
         await interaction.followup.send("❌ Error: Missing permissions to send message to this channel.", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"❌ An error occurred: {e}", ephemeral=True)
+    
+    # CRITICAL: We do NOT update state.last_bot_send_time
+    # This ensures the original schedule is not affected.
 
 
 @tree.command(name="shea", description="Gives Shea a random, weirdly specific compliment.")
@@ -865,6 +925,7 @@ async def compliment_lyra(interaction: discord.Interaction):
         await interaction.followup.send(f"💖 A truly sincere, yet slightly confusing, message for Lyra: {compliment}")
 
 
+# --- NEW: /hangman Command ---
 @tree.command(name="hangman", description="Start or play a game of Hangman.")
 @discord.app_commands.describe(guess="Guess a letter or the whole word.")
 async def hangman(interaction: discord.Interaction, guess: str = None):
@@ -872,11 +933,12 @@ async def hangman(interaction: discord.Interaction, guess: str = None):
     game = HANGMAN_GAMES.get(channel_id)
 
     if not game and not guess:
+        # Start a new game
         if not GEMINI_API_KEY:
             await interaction.response.send_message("❌ **Error:** `GEMINI_API_KEY` is missing, cannot get a word.", ephemeral=True)
             return
             
-        await interaction.response.defer(ephemeral=False) 
+        await interaction.response.defer(ephemeral=False) # Defer publicly
         
         word, error = await get_hangman_word()
         if error:
@@ -890,29 +952,36 @@ async def hangman(interaction: discord.Interaction, guess: str = None):
         return
 
     if not game and guess:
+        # Trying to guess without a game
         await interaction.response.send_message("No game is running! Start one with `/hangman`.", ephemeral=True)
         return
 
     if game and not guess:
+        # Trying to start a game mid-game
         await interaction.response.send_message("A game is already in progress in this channel!", ephemeral=True)
         return
 
     if game and guess:
+        # Making a guess
         if not game.message_id:
             await interaction.response.send_message("Game state is broken, please start a new game with `/hangman`.", ephemeral=True)
             if channel_id in HANGMAN_GAMES: del HANGMAN_GAMES[channel_id]
             return
             
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True) # Defer privately for the guesser
         
         game.make_guess(guess)
         
         try:
+            # Fetch the original game message
             message = await interaction.channel.fetch_message(game.message_id)
+            # Edit the message with the new state
             await message.edit(content=game.get_display_message())
+            # Send a silent confirmation to the guesser
             await interaction.followup.send(f"You guessed: `{guess}`", ephemeral=True)
             
         except discord.NotFound:
+            # Message was deleted
             await interaction.followup.send("The game message was deleted! Game over.", ephemeral=True)
             if channel_id in HANGMAN_GAMES: del HANGMAN_GAMES[channel_id]
         except Exception as e:
@@ -920,6 +989,7 @@ async def hangman(interaction: discord.Interaction, guess: str = None):
             await interaction.followup.send(f"Error updating game: {e}", ephemeral=True)
 
         if game.game_over:
+            # Clean up the finished game
             if channel_id in HANGMAN_GAMES:
                 del HANGMAN_GAMES[channel_id]
         return
