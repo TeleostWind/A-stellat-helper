@@ -7,6 +7,8 @@ from aiohttp import ClientSession, ClientConnectorError
 import json
 import time
 from typing import Dict, Set, List
+from datetime import timedelta
+from collections import defaultdict
 
 # --- Configuration ---
 # Load environment variables (set in Railway dashboard)
@@ -26,10 +28,16 @@ ALLOWED_GIF_ROLES = [
 TARGET_LOG_SERVER_ID = 1371466080299778138
 TARGET_ADMIN_USER_ID = 748448138997530684
 
+# --- Anti-Raid State & Config ---
+ANTI_RAID_ENABLED = False
+ADMIN_IDS_TO_ALERT = [386468721918607373, 748448138997530684, 833725698715025409]
+user_message_times = defaultdict(list)
+recent_joins = []
+
 # --- Bot Setup ---
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True # Required for checking roles for GIF deletion
+intents.members = True # Required for checking roles for GIF deletion and Anti-Raid joins
 client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
 
@@ -198,6 +206,19 @@ class HangmanGame:
 # Key: channel_id (int), Value: HangmanGame object
 HANGMAN_GAMES: Dict[int, HangmanGame] = {}
 
+
+# --- Anti-Raid Helper Function ---
+async def alert_admins(message_text: str):
+    """Sends a DM pinging the specified admins for anti-raid alerts."""
+    for admin_id in ADMIN_IDS_TO_ALERT:
+        try:
+            user = client.get_user(admin_id)
+            if not user:
+                user = await client.fetch_user(admin_id)
+            dm_channel = await user.create_dm()
+            await dm_channel.send(f"<@{admin_id}> {message_text}")
+        except Exception as e:
+            print(f"Failed to send Anti-Raid DM to {admin_id}: {e}")
 
 # --- AI Service Functions ---
 
@@ -529,6 +550,33 @@ async def on_ready():
         print("Scheduler task started.")
 
 @client.event
+async def on_member_join(member):
+    """
+    Anti-Raid Join Spike Filter
+    Bans raiders if there is a sudden influx of accounts joining.
+    """
+    global recent_joins
+    
+    if not ANTI_RAID_ENABLED:
+        return
+        
+    current_time = time.time()
+    recent_joins.append(current_time)
+    
+    # Keep only joins from the last 10 seconds
+    recent_joins = [t for t in recent_joins if current_time - t <= 10]
+    
+    # Threshold: 5 accounts joining within a 10 second window
+    if len(recent_joins) >= 5:
+        try:
+            await member.ban(reason="Anti-Raid: Join Spike Detected")
+            await alert_admins(f"🚨 **RAID ALERT:** Join spike detected! Banned new account: {member.mention} (`{member.id}`)")
+        except discord.Forbidden:
+            await alert_admins(f"🚨 **RAID ALERT:** Join spike detected, but I lack permissions to ban {member.mention}!")
+        except Exception as e:
+            print(f"Error processing Anti-Raid ban: {e}")
+
+@client.event
 async def on_message_delete(message):
     """
     Logs deleted messages and GIFs from the specific server and DMs them to the specified admin.
@@ -578,6 +626,42 @@ async def on_message_delete(message):
 async def on_message(message):
     if message.author == client.user:
         return
+
+    # --- Anti-Raid System Filters ---
+    if ANTI_RAID_ENABLED and isinstance(message.author, discord.Member) and not message.author.bot:
+        # 1. Mass Mention Filter
+        # If they ping more than 5 users in one message, delete and ban.
+        if len(message.mentions) > 5:
+            try:
+                await message.delete()
+                await message.author.ban(reason="Anti-Raid: Mass Ping Detected")
+                await alert_admins(f"🚨 **RAID ALERT:** Mass ping detected! Banned raider: {message.author.mention} (`{message.author.id}`)")
+            except discord.Forbidden:
+                await alert_admins(f"🚨 **RAID ALERT:** Mass ping detected, but I lack permissions to ban {message.author.mention}!")
+            return # Stop processing anything else
+
+        # 2. Velocity Filter (Anti-Spam)
+        # Limits to 7 messages in 5 seconds. If exceeded: 1 minute timeout.
+        author_id = message.author.id
+        current_time = time.time()
+        user_message_times[author_id].append(current_time)
+        
+        # Keep only timestamps from the last 5 seconds for this user
+        user_message_times[author_id] = [t for t in user_message_times[author_id] if current_time - t <= 5]
+        
+        if len(user_message_times[author_id]) >= 7:
+            try:
+                await message.delete()
+                duration = timedelta(minutes=1)
+                await message.author.timeout(duration, reason="Anti-Raid: Spam Detected")
+                await alert_admins(f"⚠️ **SPAM ALERT:** User {message.author.mention} (`{message.author.id}`) sent 7+ messages in 5 seconds. They have been given a 1-minute timeout.")
+                
+                # Clear their history so it doesn't trigger repeatedly on lingering timestamps
+                user_message_times[author_id].clear()
+            except discord.Forbidden:
+                pass
+            return # Stop processing
+
 
     # --- GIF Block Filter (Merged from Bot 2) ---
     # First, verify the author is an actual Member in a Server (not DMing the bot)
@@ -650,6 +734,30 @@ def get_display_interval(interval_seconds: int) -> str:
 
 
 # --- Slash Commands ---
+
+# --- NEW: Anti-Raid Command ---
+@tree.command(name="antiraid", description="Toggle Anti-Raid mode on or off.")
+@discord.app_commands.describe(action="Start or Stop", password="Password required.")
+@discord.app_commands.choices(action=[
+    discord.app_commands.Choice(name="Start", value="start"),
+    discord.app_commands.Choice(name="Stop", value="stop")
+])
+async def antiraid_toggle(interaction: discord.Interaction, action: str, password: str):
+    global ANTI_RAID_ENABLED
+    
+    if password != "britishfoodsucks":
+        await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
+        return
+
+    if action == "start":
+        ANTI_RAID_ENABLED = True
+        await interaction.response.send_message("🛡️ **Anti-Raid Mode Activated!** The server is now protected.", ephemeral=False)
+        await alert_admins("🛡️ **System Alert:** Anti-Raid Mode has been **ACTIVATED**.")
+    else:
+        ANTI_RAID_ENABLED = False
+        await interaction.response.send_message("⚠️ **Anti-Raid Mode Deactivated.**", ephemeral=False)
+        await alert_admins("⚠️ **System Alert:** Anti-Raid Mode has been **DEACTIVATED**.")
+
 
 @tree.command(name="manual", description="Schedule a fixed message for this channel.")
 @discord.app_commands.describe(message="The exact message to repeat.", interval_hours="The interval in hours (e.g., 2 or 0.5).")
