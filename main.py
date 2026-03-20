@@ -7,7 +7,7 @@ from aiohttp import ClientSession, ClientConnectorError
 import json
 import time
 from typing import Dict, Set, List
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone
 from collections import defaultdict
 
 # --- Configuration ---
@@ -552,11 +552,34 @@ async def on_ready():
 @client.event
 async def on_member_join(member):
     """
-    Anti-Raid Join Spike Filter
-    Bans raiders if there is a sudden influx of accounts joining.
+    Anti-Raid Join Spike Filter & Role Restoration
     """
     global recent_joins
     
+    # ---- NEW: Role Restoration System ----
+    try:
+        if os.path.exists("clone_data.json"):
+            with open("clone_data.json", "r", encoding="utf-8") as f:
+                clone_data = json.load(f)
+            
+            user_id_str = str(member.id)
+            if "roles_map" in clone_data and user_id_str in clone_data["roles_map"]:
+                roles_to_add = []
+                for role_name in clone_data["roles_map"][user_id_str]:
+                    # Ignore @everyone or integration roles
+                    if role_name == "@everyone": continue
+                    
+                    role = discord.utils.get(member.guild.roles, name=role_name)
+                    if role and not role.is_bot_managed() and not role.is_premium_subscriber():
+                        roles_to_add.append(role)
+                
+                if roles_to_add:
+                    await member.add_roles(*roles_to_add, reason="Role Restoration from Cloned Server")
+                    print(f"Restored roles for {member.name}")
+    except Exception as e:
+        print(f"Error restoring roles for {member.name}: {e}")
+    # ---- END NEW ----
+
     if not ANTI_RAID_ENABLED:
         return
         
@@ -1101,6 +1124,164 @@ async def hangman(interaction: discord.Interaction, guess: str = None):
             if channel_id in HANGMAN_GAMES:
                 del HANGMAN_GAMES[channel_id]
         return
+
+
+# ==========================================
+# --- NEW: SERVER CLONING SYSTEM ---
+# ==========================================
+
+async def perform_copy(guild: discord.Guild, user: discord.Member):
+    """Background task to fetch and save all messages and roles."""
+    clone_data = {
+        "guild_id": guild.id,
+        "roles_map": {},
+        "channels": {}
+    }
+    
+    # Save Roles Map
+    for member in guild.members:
+        clone_data["roles_map"][str(member.id)] = [r.name for r in member.roles]
+
+    # Process all text channels
+    for channel in guild.text_channels:
+        try:
+            messages = []
+            user_msg_counts = {}
+            
+            # Fetch from oldest to newest to maintain chronological order easily
+            async for msg in channel.history(limit=None, oldest_first=False):
+                if not msg.content and not msg.attachments:
+                    continue
+                
+                # We need the FIRST 25 we see (because oldest_first=False goes newest->oldest)
+                author_id = msg.author.id
+                count = user_msg_counts.get(author_id, 0)
+                use_webhook = count < 25
+                user_msg_counts[author_id] = count + 1
+
+                # Construct content (text + GIFs)
+                content = msg.content
+                for att in msg.attachments:
+                    if att.filename.lower().endswith(".gif") or (att.content_type and "gif" in att.content_type):
+                        content += f"\n{att.url}"
+                
+                if not content.strip():
+                    continue
+
+                timestamp = msg.created_at.astimezone(timezone.utc).strftime("%m/%d/%Y , %I:%M %p")
+                
+                messages.append({
+                    "author_name": msg.author.display_name,
+                    "author_avatar": msg.author.display_avatar.url if msg.author.display_avatar else None,
+                    "content": content,
+                    "use_webhook": use_webhook,
+                    "timestamp": timestamp
+                })
+            
+            # Reverse to put them in chronological order
+            messages.reverse()
+            clone_data["channels"][channel.name] = messages
+            
+        except discord.Forbidden:
+            print(f"Skipped {channel.name} due to missing permissions.")
+        except Exception as e:
+            print(f"Error fetching {channel.name}: {e}")
+
+    # Save to JSON
+    with open("clone_data.json", "w", encoding="utf-8") as f:
+        json.dump(clone_data, f, indent=4)
+        
+    try:
+        await user.send("✅ **Server Copy Complete!**\nThe data has been saved. You can now use `/paste` in the new server. *Remember: If the bot restarts on Render before you paste, the data will be lost.*")
+    except:
+        pass
+
+
+async def perform_paste(guild: discord.Guild, user: discord.Member):
+    """Background task to paste messages into matching channels."""
+    if not os.path.exists("clone_data.json"):
+        try:
+            await user.send("❌ **Error:** No clone data found. You must run `/copy` first.")
+        except: pass
+        return
+
+    with open("clone_data.json", "r", encoding="utf-8") as f:
+        clone_data = json.load(f)
+
+    for channel_name, messages in clone_data.get("channels", {}).items():
+        # Find matching channel in new server
+        target_channel = discord.utils.get(guild.text_channels, name=channel_name)
+        if not target_channel:
+            continue
+
+        # Try to find or create a Webhook
+        webhook = None
+        try:
+            webhooks = await target_channel.webhooks()
+            webhook = next((w for w in webhooks if w.name == "CloneHook"), None)
+            if not webhook:
+                webhook = await target_channel.create_webhook(name="CloneHook")
+        except:
+            print(f"Could not create/fetch webhook in {channel_name}. Webhooks will fallback to text.")
+
+        for msg_data in messages:
+            content = msg_data["content"]
+            
+            # Use Webhook for the latest 25 (if we have webhook permission)
+            if msg_data["use_webhook"] and webhook:
+                try:
+                    await webhook.send(
+                        content=content,
+                        username=msg_data["author_name"],
+                        avatar_url=msg_data["author_avatar"]
+                    )
+                except Exception as e:
+                    print(f"Webhook send failed: {e}")
+            else:
+                # Standard text fallback
+                formatted_msg = f"**{msg_data['author_name']}** ({msg_data['timestamp']}) : {content}"
+                # Handle 2000 char limit
+                if len(formatted_msg) > 2000:
+                    formatted_msg = formatted_msg[:1997] + "..."
+                
+                try:
+                    await target_channel.send(formatted_msg)
+                except Exception as e:
+                    print(f"Text send failed: {e}")
+            
+            # VERY IMPORTANT to avoid Discord Rate Limits
+            await asyncio.sleep(1.5)
+
+    try:
+        await user.send("✅ **Server Paste Complete!** All channels have been populated.")
+    except: pass
+
+
+@tree.command(name="copy", description="Copies all messages from this server to memory.")
+@discord.app_commands.describe(password="Password required.")
+async def copy_server_cmd(interaction: discord.Interaction, password: str):
+    if password != "55555":
+        await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
+        return
+        
+    # Start task in background so Interaction doesn't timeout
+    await interaction.response.send_message("📥 **Copying server...** This will take a while. I will DM you when it's done.", ephemeral=True)
+    asyncio.create_task(perform_copy(interaction.guild, interaction.user))
+
+
+@tree.command(name="paste", description="Pastes copied messages into matching channels here.")
+@discord.app_commands.describe(password="Password required.")
+async def paste_server_cmd(interaction: discord.Interaction, password: str):
+    if password != "55555":
+        await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
+        return
+        
+    await interaction.response.send_message("📤 **Pasting server...** This will take a long time to avoid API rate limits. I will DM you when it's done.", ephemeral=True)
+    asyncio.create_task(perform_paste(interaction.guild, interaction.user))
+
+# ==========================================
+# --- END NEW: SERVER CLONING SYSTEM ---
+# ==========================================
 
 
 # --- Main Entry Point ---
