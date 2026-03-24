@@ -534,13 +534,19 @@ async def send_scheduled_message():
             except Exception as e:
                 print(f"An error occurred while sending message to {channel_id}: {e}")
 
+# --- Command Groups Definition ---
+stop_group = discord.app_commands.Group(name="stop", description="Stop scheduled announcements.")
+short_group = discord.app_commands.Group(name="short", description="Short server cloning (last 5 days).")
+channel_group = discord.app_commands.Group(name="channel", description="Single channel cloning.")
 
 # --- Discord Events ---
 
 @client.event
 async def on_ready():
-    # Add the new command group
+    # Add the new command groups
     tree.add_command(stop_group)
+    tree.add_command(short_group)
+    tree.add_command(channel_group)
     await tree.sync()
     print(f'Logged in as {client.user} (ID: {client.user.id})')
     print('Bot is ready and running.')
@@ -932,10 +938,6 @@ async def global_announcement(interaction: discord.Interaction, channel_id: str,
     except Exception as e:
         await interaction.response.send_message(f"❌ **Error:** {e}", ephemeral=True)
 
-
-# --- NEW: Stop Command Group ---
-stop_group = discord.app_commands.Group(name="stop", description="Stop scheduled announcements.")
-
 @stop_group.command(name="channel", description="Stop the schedule for this channel only.")
 async def stop_channel(interaction: discord.Interaction):
     if interaction.channel_id in CHANNEL_STATES:
@@ -1257,6 +1259,176 @@ async def perform_paste(guild: discord.Guild, user: discord.Member):
     except: pass
 
 
+async def perform_short_copy(guild: discord.Guild, user: discord.Member):
+    """Background task to fetch and save messages from only the last 5 days."""
+    clone_data = {"guild_id": guild.id, "channels": {}}
+    five_days_ago = datetime.now(timezone.utc) - timedelta(days=5)
+
+    for channel in guild.text_channels:
+        try:
+            messages = []
+            async for msg in channel.history(limit=None, after=five_days_ago, oldest_first=False):
+                if not msg.content and not msg.attachments:
+                    continue
+                
+                content = msg.content
+                for att in msg.attachments:
+                    if att.filename.lower().endswith(".gif") or (att.content_type and "gif" in att.content_type):
+                        content += f"\n{att.url}"
+                if not content.strip():
+                    continue
+
+                timestamp = msg.created_at.astimezone(timezone.utc).strftime("%m/%d/%Y , %I:%M %p")
+                messages.append({
+                    "author_name": msg.author.display_name,
+                    "author_avatar": msg.author.display_avatar.url if msg.author.display_avatar else None,
+                    "content": content,
+                    "use_webhook": True, # Always TRUE for short copy
+                    "timestamp": timestamp
+                })
+            
+            messages.reverse()
+            if messages:
+                clone_data["channels"][channel.name] = messages
+                
+        except discord.Forbidden:
+            print(f"Skipped short copy {channel.name} due to missing permissions.")
+        except Exception as e:
+            print(f"Error fetching short {channel.name}: {e}")
+
+    with open("short_clone_data.json", "w", encoding="utf-8") as f:
+        json.dump(clone_data, f, indent=4)
+        
+    try:
+        await user.send("✅ **Short Server Copy Complete!**\nThe 5-day data has been saved. You can now use `/short paste` in the new server.")
+    except: pass
+
+
+async def perform_short_paste(guild: discord.Guild, user: discord.Member):
+    """Background task to paste the 5-day data using webhooks for all messages."""
+    if not os.path.exists("short_clone_data.json"):
+        try: await user.send("❌ **Error:** No short clone data found. Run `/short copy` first.")
+        except: pass
+        return
+
+    with open("short_clone_data.json", "r", encoding="utf-8") as f:
+        clone_data = json.load(f)
+
+    for channel_name, messages in clone_data.get("channels", {}).items():
+        target_channel = discord.utils.get(guild.text_channels, name=channel_name)
+        if not target_channel:
+            continue
+
+        webhook = None
+        try:
+            webhooks = await target_channel.webhooks()
+            webhook = next((w for w in webhooks if w.name == "CloneHook"), None)
+            if not webhook: webhook = await target_channel.create_webhook(name="CloneHook")
+        except:
+            print(f"Could not setup webhook in {channel_name} for short paste.")
+
+        for msg_data in messages:
+            content = msg_data["content"]
+            if webhook:
+                try:
+                    await webhook.send(
+                        content=content,
+                        username=msg_data["author_name"],
+                        avatar_url=msg_data["author_avatar"]
+                    )
+                except Exception as e:
+                    print(f"Webhook send failed: {e}")
+            else:
+                formatted_msg = f"**{msg_data['author_name']}** ({msg_data['timestamp']}) : {content}"
+                if len(formatted_msg) > 2000: formatted_msg = formatted_msg[:1997] + "..."
+                try: await target_channel.send(formatted_msg)
+                except Exception as e: pass
+            
+            await asyncio.sleep(1.5)
+
+    try: await user.send("✅ **Short Server Paste Complete!**")
+    except: pass
+
+
+async def perform_channel_copy(channel: discord.TextChannel, user: discord.Member):
+    """Background task to fetch and save all messages from a single channel."""
+    clone_data = {"channel_name": channel.name, "messages": []}
+    
+    try:
+        messages = []
+        async for msg in channel.history(limit=None, oldest_first=False):
+            if not msg.content and not msg.attachments: continue
+            
+            content = msg.content
+            for att in msg.attachments:
+                if att.filename.lower().endswith(".gif") or (att.content_type and "gif" in att.content_type):
+                    content += f"\n{att.url}"
+            if not content.strip(): continue
+
+            timestamp = msg.created_at.astimezone(timezone.utc).strftime("%m/%d/%Y , %I:%M %p")
+            messages.append({
+                "author_name": msg.author.display_name,
+                "author_avatar": msg.author.display_avatar.url if msg.author.display_avatar else None,
+                "content": content,
+                "use_webhook": True, # Always TRUE for channel copy
+                "timestamp": timestamp
+            })
+            
+        messages.reverse()
+        clone_data["messages"] = messages
+    except Exception as e:
+        print(f"Error fetching channel {channel.name}: {e}")
+
+    with open("channel_clone_data.json", "w", encoding="utf-8") as f:
+        json.dump(clone_data, f, indent=4)
+        
+    try:
+        await user.send(f"✅ **Channel Copy Complete!**\nData for #{channel.name} has been saved. You can now use `/channel paste`.")
+    except: pass
+
+
+async def perform_channel_paste(target_channel: discord.TextChannel, user: discord.Member):
+    """Background task to paste the copied channel data into the current channel."""
+    if not os.path.exists("channel_clone_data.json"):
+        try: await user.send("❌ **Error:** No channel clone data found. Run `/channel copy` first.")
+        except: pass
+        return
+
+    with open("channel_clone_data.json", "r", encoding="utf-8") as f:
+        clone_data = json.load(f)
+
+    messages = clone_data.get("messages", [])
+    webhook = None
+    try:
+        webhooks = await target_channel.webhooks()
+        webhook = next((w for w in webhooks if w.name == "CloneHook"), None)
+        if not webhook: webhook = await target_channel.create_webhook(name="CloneHook")
+    except:
+        print(f"Could not setup webhook in {target_channel.name} for channel paste.")
+
+    for msg_data in messages:
+        content = msg_data["content"]
+        if webhook:
+            try:
+                await webhook.send(
+                    content=content,
+                    username=msg_data["author_name"],
+                    avatar_url=msg_data["author_avatar"]
+                )
+            except Exception as e:
+                print(f"Webhook send failed: {e}")
+        else:
+            formatted_msg = f"**{msg_data['author_name']}** ({msg_data['timestamp']}) : {content}"
+            if len(formatted_msg) > 2000: formatted_msg = formatted_msg[:1997] + "..."
+            try: await target_channel.send(formatted_msg)
+            except Exception as e: pass
+            
+        await asyncio.sleep(1.5)
+
+    try: await user.send("✅ **Channel Paste Complete!**")
+    except: pass
+
+
 @tree.command(name="copy", description="Copies all messages from this server to memory.")
 @discord.app_commands.describe(password="Password required.")
 async def copy_server_cmd(interaction: discord.Interaction, password: str):
@@ -1278,6 +1450,50 @@ async def paste_server_cmd(interaction: discord.Interaction, password: str):
         
     await interaction.response.send_message("📤 **Pasting server...** This will take a long time to avoid API rate limits. I will DM you when it's done.", ephemeral=True)
     asyncio.create_task(perform_paste(interaction.guild, interaction.user))
+
+
+@short_group.command(name="copy", description="Copies the last 5 days of messages to memory (Webhooks only).")
+@discord.app_commands.describe(password="Password required.")
+async def short_copy_cmd(interaction: discord.Interaction, password: str):
+    if password != "55555":
+        await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
+        return
+        
+    await interaction.response.send_message("📥 **Copying recent server data (5 days)...** I will DM you when it's done.", ephemeral=True)
+    asyncio.create_task(perform_short_copy(interaction.guild, interaction.user))
+
+
+@short_group.command(name="paste", description="Pastes the last 5 days of messages into matching channels.")
+@discord.app_commands.describe(password="Password required.")
+async def short_paste_cmd(interaction: discord.Interaction, password: str):
+    if password != "55555":
+        await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
+        return
+        
+    await interaction.response.send_message("📤 **Pasting recent server data...** This will take time to avoid rate limits.", ephemeral=True)
+    asyncio.create_task(perform_short_paste(interaction.guild, interaction.user))
+
+
+@channel_group.command(name="copy", description="Copies all messages from the CURRENT channel to memory.")
+@discord.app_commands.describe(password="Password required.")
+async def channel_copy_cmd(interaction: discord.Interaction, password: str):
+    if password != "55555":
+        await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
+        return
+        
+    await interaction.response.send_message("📥 **Copying this channel...** I will DM you when it's done.", ephemeral=True)
+    asyncio.create_task(perform_channel_copy(interaction.channel, interaction.user))
+
+
+@channel_group.command(name="paste", description="Pastes the copied channel data into the CURRENT channel.")
+@discord.app_commands.describe(password="Password required.")
+async def channel_paste_cmd(interaction: discord.Interaction, password: str):
+    if password != "55555":
+        await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
+        return
+        
+    await interaction.response.send_message("📤 **Pasting channel data...** This will take time to avoid rate limits.", ephemeral=True)
+    asyncio.create_task(perform_channel_paste(interaction.channel, interaction.user))
 
 # ==========================================
 # --- END NEW: SERVER CLONING SYSTEM ---
