@@ -9,6 +9,7 @@ import time
 from typing import Dict, Set, List
 from datetime import timedelta, datetime, timezone
 from collections import defaultdict
+import random
 
 # --- Configuration ---
 # Load environment variables (set in Railway dashboard)
@@ -333,55 +334,26 @@ async def parse_automatic_prompt(full_prompt):
             return None, "Error: AI parser response was not in the expected format."
 
 
-async def generate_shea_compliment():
-    if not GEMINI_API_KEY: return "Error: Gemini API Key not configured."
+# --- NEW: Riddle Generator ---
+async def get_gemini_riddle():
+    """Calls Gemini API to generate a logic puzzle or riddle."""
+    if not GEMINI_API_KEY: return None, "Error: Gemini API Key not configured."
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-    system_prompt = "You are a compliment generator. Create a single, short, and weirdly specific compliment about 'Shea'. The compliment must be between 5 and 40 words. Do not use markdown titles or headers, just the text of the compliment."
+    
+    system_prompt = "Generate a clever logic puzzle or riddle. Provide the riddle first, then leave two newlines, then provide the answer hidden within markdown spoiler tags (||answer||)."
+    
     payload = {
-        "contents": [{"parts": [{"text": "Generate a compliment for Shea."}]}],
-        "systemInstruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"parts": [{"text": "Give me a logic puzzle or riddle."}]}],
+        "systemInstruction": {"parts": [{"text": system_prompt}]}
     }
+    
     async with ClientSession() as session:
         result, error = await fetch_with_backoff(session, url, payload)
-        if error: return error
+        if error: return None, error
         try:
-            return result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'Shea is like a perfectly aged cheese—complex and delightful.')
+            return result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'Failed to generate riddle.'), None
         except (IndexError, KeyError, TypeError):
-            return "Error: AI response was not in the expected format."
-
-
-async def generate_shea_insult():
-    if not GEMINI_API_KEY: return "Error: Gemini API Key not configured."
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-    system_prompt = "You are an insult generator. Create a single, funny, and passive-aggressive insult directed at 'Shea'. The insult must be between 5 and 40 words. Frame it as a backhanded compliment or a gentle, confusing dig. Do not use markdown titles or headers, just the text of the insult."
-    payload = {
-        "contents": [{"parts": [{"text": "Generate a passive-aggressive insult for Shea."}]}],
-        "systemInstruction": {"parts": [{"text": system_prompt}]},
-    }
-    async with ClientSession() as session:
-        result, error = await fetch_with_backoff(session, url, payload)
-        if error: return error
-        try:
-            return result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'Shea, your ability to consistently not be the worst person in the room is truly inspiring.')
-        except (IndexError, KeyError, TypeError):
-            return "Error: AI response was not in the expected format."
-
-
-async def generate_lyra_compliment():
-    if not GEMINI_API_KEY: return "Error: Gemini API Key not configured."
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-    system_prompt = "You are a compliment generator. Create a single, short, extremely corny, and awkward compliment about 'Lyra'. Use overly dramatic or slightly misplaced metaphors. The compliment must be between 5 and 40 words. Do not use markdown titles or headers, just the text of the compliment."
-    payload = {
-        "contents": [{"parts": [{"text": "Generate a corny and awkward compliment for Lyra."}]}],
-        "systemInstruction": {"parts": [{"text": system_prompt}]},
-    }
-    async with ClientSession() as session:
-        result, error = await fetch_with_backoff(session, url, payload)
-        if error: return error
-        try:
-            return result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'Lyra, your presence is like a single, magnificent, sparkly unicorn tear of joy.')
-        except (IndexError, KeyError, TypeError):
-            return "Error: AI response was not in the expected format."
+            return None, "Error: AI response was not in the expected format."
 
 
 # --- NEW: Hangman Word Generator ---
@@ -431,6 +403,7 @@ async def get_hangman_word():
             return word.lower(), None
         except (IndexError, KeyError, TypeError, json.JSONDecodeError):
             return "fallback", None # Fallback
+
 
 # --- NEW: Chat Logic ---
 async def generate_chat_response(user_id, user_name, user_input):
@@ -536,8 +509,6 @@ async def send_scheduled_message():
 
 # --- Command Groups Definition ---
 stop_group = discord.app_commands.Group(name="stop", description="Stop scheduled announcements.")
-short_group = discord.app_commands.Group(name="short", description="Short server cloning (last 5 days).")
-channel_group = discord.app_commands.Group(name="channel", description="Single channel cloning.")
 
 # --- Discord Events ---
 
@@ -545,8 +516,6 @@ channel_group = discord.app_commands.Group(name="channel", description="Single c
 async def on_ready():
     # Add the new command groups
     tree.add_command(stop_group)
-    tree.add_command(short_group)
-    tree.add_command(channel_group)
     await tree.sync()
     print(f'Logged in as {client.user} (ID: {client.user.id})')
     print('Bot is ready and running.')
@@ -558,34 +527,10 @@ async def on_ready():
 @client.event
 async def on_member_join(member):
     """
-    Anti-Raid Join Spike Filter & Role Restoration
+    Anti-Raid Join Spike Filter
     """
     global recent_joins
     
-    # ---- NEW: Role Restoration System ----
-    try:
-        if os.path.exists("clone_data.json"):
-            with open("clone_data.json", "r", encoding="utf-8") as f:
-                clone_data = json.load(f)
-            
-            user_id_str = str(member.id)
-            if "roles_map" in clone_data and user_id_str in clone_data["roles_map"]:
-                roles_to_add = []
-                for role_name in clone_data["roles_map"][user_id_str]:
-                    # Ignore @everyone or integration roles
-                    if role_name == "@everyone": continue
-                    
-                    role = discord.utils.get(member.guild.roles, name=role_name)
-                    if role and not role.is_bot_managed() and not role.is_premium_subscriber():
-                        roles_to_add.append(role)
-                
-                if roles_to_add:
-                    await member.add_roles(*roles_to_add, reason="Role Restoration from Cloned Server")
-                    print(f"Restored roles for {member.name}")
-    except Exception as e:
-        print(f"Error restoring roles for {member.name}: {e}")
-    # ---- END NEW ----
-
     if not ANTI_RAID_ENABLED:
         return
         
@@ -1015,47 +960,60 @@ async def test_schedule(interaction: discord.Interaction):
     # This ensures the original schedule is not affected.
 
 
-@tree.command(name="shea", description="Gives Shea a random, weirdly specific compliment.")
-async def compliment_shea(interaction: discord.Interaction):
-    if not GEMINI_API_KEY:
-        await interaction.response.send_message("❌ **Error:** `GEMINI_API_KEY` is missing.", ephemeral=True)
-        return
-        
-    await interaction.response.defer(ephemeral=False)
-    compliment = await generate_shea_compliment()
-    
-    if compliment.startswith("Error:"):
-        await interaction.followup.send(f"❌ **AI Compliment Failed!** Reason: {compliment}", ephemeral=False)
-    else:
-        await interaction.followup.send(f"✨ A message for Shea: {compliment}")
+# --- MINIGAMES & FUN COMMANDS ---
 
-@tree.command(name="sheainsult", description="Insults Shea in a funny, passive-aggressive way.")
-async def insult_shea(interaction: discord.Interaction):
+@tree.command(name="riddle", description="Get a random logic puzzle or riddle.")
+async def play_riddle(interaction: discord.Interaction):
     if not GEMINI_API_KEY:
         await interaction.response.send_message("❌ **Error:** `GEMINI_API_KEY` is missing.", ephemeral=True)
         return
         
     await interaction.response.defer(ephemeral=False)
-    insult = await generate_shea_insult()
+    riddle_text, error = await get_gemini_riddle()
     
-    if insult.startswith("Error:"):
-        await interaction.followup.send(f"❌ **AI Insult Failed!** Reason: {insult}", ephemeral=False)
+    if error:
+        await interaction.followup.send(f"❌ **AI Riddle Failed!** Reason: {error}", ephemeral=False)
     else:
-        await interaction.followup.send(f"☕ A kind message for Shea: {insult}")
-        
-@tree.command(name="lyra", description="Gives Lyra a random, corny and awkward compliment.")
-async def compliment_lyra(interaction: discord.Interaction):
-    if not GEMINI_API_KEY:
-        await interaction.response.send_message("❌ **Error:** `GEMINI_API_KEY` is missing.", ephemeral=True)
-        return
-        
-    await interaction.response.defer(ephemeral=False)
-    compliment = await generate_lyra_compliment()
+        await interaction.followup.send(f"🧩 **Here is a riddle for you:**\n\n{riddle_text}")
+
+@tree.command(name="rps", description="Play a game of Rock, Paper, Scissors.")
+@discord.app_commands.describe(choice="Choose rock, paper, or scissors.")
+@discord.app_commands.choices(choice=[
+    discord.app_commands.Choice(name="Rock", value="rock"),
+    discord.app_commands.Choice(name="Paper", value="paper"),
+    discord.app_commands.Choice(name="Scissors", value="scissors")
+])
+async def play_rps(interaction: discord.Interaction, choice: str):
+    bot_choice = random.choice(["rock", "paper", "scissors"])
     
-    if compliment.startswith("Error:"):
-        await interaction.followup.send(f"❌ **AI Compliment Failed!** Reason: {compliment}", ephemeral=False)
+    if choice == bot_choice:
+        result = "It's a tie! 🤝"
+    elif (choice == "rock" and bot_choice == "scissors") or \
+         (choice == "paper" and bot_choice == "rock") or \
+         (choice == "scissors" and bot_choice == "paper"):
+        result = "You win! 🎉"
     else:
-        await interaction.followup.send(f"💖 A truly sincere, yet slightly confusing, message for Lyra: {compliment}")
+        result = "I win! 🤖"
+        
+    await interaction.response.send_message(f"You chose **{choice}**. I chose **{bot_choice}**.\n{result}")
+
+@tree.command(name="8ball", description="Ask the magic 8-ball a question.")
+@discord.app_commands.describe(question="The question you want to ask.")
+async def magic_8ball(interaction: discord.Interaction, question: str):
+    responses = [
+        "It is certain.", "It is decidedly so.", "Without a doubt.", 
+        "Yes - definitely.", "You may rely on it.", "As I see it, yes.", 
+        "Most likely.", "Outlook good.", "Yes.", "Signs point to yes.", 
+        "Reply hazy, try again.", "Ask again later.", "Better not tell you now.", 
+        "Cannot predict now.", "Concentrate and ask again.", "Don't count on it.", 
+        "My reply is no.", "My sources say no.", "Outlook not so good.", "Very doubtful."
+    ]
+    await interaction.response.send_message(f"🎱 **Question:** {question}\n🔮 **Answer:** {random.choice(responses)}")
+
+@tree.command(name="coinflip", description="Flip a coin.")
+async def coinflip(interaction: discord.Interaction):
+    result = random.choice(["Heads", "Tails"])
+    await interaction.response.send_message(f"🪙 You flipped the coin and got: **{result}**!")
 
 
 # --- NEW: /hangman Command ---
@@ -1126,378 +1084,6 @@ async def hangman(interaction: discord.Interaction, guess: str = None):
             if channel_id in HANGMAN_GAMES:
                 del HANGMAN_GAMES[channel_id]
         return
-
-
-# ==========================================
-# --- NEW: SERVER CLONING SYSTEM ---
-# ==========================================
-
-async def perform_copy(guild: discord.Guild, user: discord.Member):
-    """Background task to fetch and save all messages and roles."""
-    clone_data = {
-        "guild_id": guild.id,
-        "roles_map": {},
-        "channels": {}
-    }
-    
-    # Save Roles Map
-    for member in guild.members:
-        clone_data["roles_map"][str(member.id)] = [r.name for r in member.roles]
-
-    # Process all text channels
-    for channel in guild.text_channels:
-        try:
-            messages = []
-            user_msg_counts = {}
-            
-            # Fetch from oldest to newest to maintain chronological order easily
-            async for msg in channel.history(limit=None, oldest_first=False):
-                if not msg.content and not msg.attachments:
-                    continue
-                
-                # We need the FIRST 25 we see (because oldest_first=False goes newest->oldest)
-                author_id = msg.author.id
-                count = user_msg_counts.get(author_id, 0)
-                use_webhook = count < 25
-                user_msg_counts[author_id] = count + 1
-
-                # Construct content (text + GIFs)
-                content = msg.content
-                for att in msg.attachments:
-                    if att.filename.lower().endswith(".gif") or (att.content_type and "gif" in att.content_type):
-                        content += f"\n{att.url}"
-                
-                if not content.strip():
-                    continue
-
-                timestamp = msg.created_at.astimezone(timezone.utc).strftime("%m/%d/%Y , %I:%M %p")
-                
-                messages.append({
-                    "author_name": msg.author.display_name,
-                    "author_avatar": msg.author.display_avatar.url if msg.author.display_avatar else None,
-                    "content": content,
-                    "use_webhook": use_webhook,
-                    "timestamp": timestamp
-                })
-            
-            # Reverse to put them in chronological order
-            messages.reverse()
-            clone_data["channels"][channel.name] = messages
-            
-        except discord.Forbidden:
-            print(f"Skipped {channel.name} due to missing permissions.")
-        except Exception as e:
-            print(f"Error fetching {channel.name}: {e}")
-
-    # Save to JSON
-    with open("clone_data.json", "w", encoding="utf-8") as f:
-        json.dump(clone_data, f, indent=4)
-        
-    try:
-        await user.send("✅ **Server Copy Complete!**\nThe data has been saved. You can now use `/paste` in the new server. *Remember: If the bot restarts on Render before you paste, the data will be lost.*")
-    except:
-        pass
-
-
-async def perform_paste(guild: discord.Guild, user: discord.Member):
-    """Background task to paste messages into matching channels."""
-    if not os.path.exists("clone_data.json"):
-        try:
-            await user.send("❌ **Error:** No clone data found. You must run `/copy` first.")
-        except: pass
-        return
-
-    with open("clone_data.json", "r", encoding="utf-8") as f:
-        clone_data = json.load(f)
-
-    for channel_name, messages in clone_data.get("channels", {}).items():
-        # Find matching channel in new server
-        target_channel = discord.utils.get(guild.text_channels, name=channel_name)
-        if not target_channel:
-            continue
-
-        # Try to find or create a Webhook
-        webhook = None
-        try:
-            webhooks = await target_channel.webhooks()
-            webhook = next((w for w in webhooks if w.name == "CloneHook"), None)
-            if not webhook:
-                webhook = await target_channel.create_webhook(name="CloneHook")
-        except:
-            print(f"Could not create/fetch webhook in {channel_name}. Webhooks will fallback to text.")
-
-        for msg_data in messages:
-            content = msg_data["content"]
-            
-            # Use Webhook for the latest 25 (if we have webhook permission)
-            if msg_data["use_webhook"] and webhook:
-                try:
-                    await webhook.send(
-                        content=content,
-                        username=msg_data["author_name"],
-                        avatar_url=msg_data["author_avatar"]
-                    )
-                except Exception as e:
-                    print(f"Webhook send failed: {e}")
-            else:
-                # Standard text fallback
-                formatted_msg = f"**{msg_data['author_name']}** ({msg_data['timestamp']}) : {content}"
-                # Handle 2000 char limit
-                if len(formatted_msg) > 2000:
-                    formatted_msg = formatted_msg[:1997] + "..."
-                
-                try:
-                    await target_channel.send(formatted_msg)
-                except Exception as e:
-                    print(f"Text send failed: {e}")
-            
-            # VERY IMPORTANT to avoid Discord Rate Limits
-            await asyncio.sleep(1.5)
-
-    try:
-        await user.send("✅ **Server Paste Complete!** All channels have been populated.")
-    except: pass
-
-
-async def perform_short_copy(guild: discord.Guild, user: discord.Member):
-    """Background task to fetch and save messages from only the last 5 days."""
-    clone_data = {"guild_id": guild.id, "channels": {}}
-    five_days_ago = datetime.now(timezone.utc) - timedelta(days=5)
-
-    for channel in guild.text_channels:
-        try:
-            messages = []
-            async for msg in channel.history(limit=None, after=five_days_ago, oldest_first=False):
-                if not msg.content and not msg.attachments:
-                    continue
-                
-                content = msg.content
-                for att in msg.attachments:
-                    if att.filename.lower().endswith(".gif") or (att.content_type and "gif" in att.content_type):
-                        content += f"\n{att.url}"
-                if not content.strip():
-                    continue
-
-                timestamp = msg.created_at.astimezone(timezone.utc).strftime("%m/%d/%Y , %I:%M %p")
-                messages.append({
-                    "author_name": msg.author.display_name,
-                    "author_avatar": msg.author.display_avatar.url if msg.author.display_avatar else None,
-                    "content": content,
-                    "use_webhook": True, # Always TRUE for short copy
-                    "timestamp": timestamp
-                })
-            
-            messages.reverse()
-            if messages:
-                clone_data["channels"][channel.name] = messages
-                
-        except discord.Forbidden:
-            print(f"Skipped short copy {channel.name} due to missing permissions.")
-        except Exception as e:
-            print(f"Error fetching short {channel.name}: {e}")
-
-    with open("short_clone_data.json", "w", encoding="utf-8") as f:
-        json.dump(clone_data, f, indent=4)
-        
-    try:
-        await user.send("✅ **Short Server Copy Complete!**\nThe 5-day data has been saved. You can now use `/short paste` in the new server.")
-    except: pass
-
-
-async def perform_short_paste(guild: discord.Guild, user: discord.Member):
-    """Background task to paste the 5-day data using webhooks for all messages."""
-    if not os.path.exists("short_clone_data.json"):
-        try: await user.send("❌ **Error:** No short clone data found. Run `/short copy` first.")
-        except: pass
-        return
-
-    with open("short_clone_data.json", "r", encoding="utf-8") as f:
-        clone_data = json.load(f)
-
-    for channel_name, messages in clone_data.get("channels", {}).items():
-        target_channel = discord.utils.get(guild.text_channels, name=channel_name)
-        if not target_channel:
-            continue
-
-        webhook = None
-        try:
-            webhooks = await target_channel.webhooks()
-            webhook = next((w for w in webhooks if w.name == "CloneHook"), None)
-            if not webhook: webhook = await target_channel.create_webhook(name="CloneHook")
-        except:
-            print(f"Could not setup webhook in {channel_name} for short paste.")
-
-        for msg_data in messages:
-            content = msg_data["content"]
-            if webhook:
-                try:
-                    await webhook.send(
-                        content=content,
-                        username=msg_data["author_name"],
-                        avatar_url=msg_data["author_avatar"]
-                    )
-                except Exception as e:
-                    print(f"Webhook send failed: {e}")
-            else:
-                formatted_msg = f"**{msg_data['author_name']}** ({msg_data['timestamp']}) : {content}"
-                if len(formatted_msg) > 2000: formatted_msg = formatted_msg[:1997] + "..."
-                try: await target_channel.send(formatted_msg)
-                except Exception as e: pass
-            
-            await asyncio.sleep(1.5)
-
-    try: await user.send("✅ **Short Server Paste Complete!**")
-    except: pass
-
-
-async def perform_channel_copy(channel: discord.TextChannel, user: discord.Member):
-    """Background task to fetch and save all messages from a single channel."""
-    clone_data = {"channel_name": channel.name, "messages": []}
-    
-    try:
-        messages = []
-        async for msg in channel.history(limit=None, oldest_first=False):
-            if not msg.content and not msg.attachments: continue
-            
-            content = msg.content
-            for att in msg.attachments:
-                if att.filename.lower().endswith(".gif") or (att.content_type and "gif" in att.content_type):
-                    content += f"\n{att.url}"
-            if not content.strip(): continue
-
-            timestamp = msg.created_at.astimezone(timezone.utc).strftime("%m/%d/%Y , %I:%M %p")
-            messages.append({
-                "author_name": msg.author.display_name,
-                "author_avatar": msg.author.display_avatar.url if msg.author.display_avatar else None,
-                "content": content,
-                "use_webhook": True, # Always TRUE for channel copy
-                "timestamp": timestamp
-            })
-            
-        messages.reverse()
-        clone_data["messages"] = messages
-    except Exception as e:
-        print(f"Error fetching channel {channel.name}: {e}")
-
-    with open("channel_clone_data.json", "w", encoding="utf-8") as f:
-        json.dump(clone_data, f, indent=4)
-        
-    try:
-        await user.send(f"✅ **Channel Copy Complete!**\nData for #{channel.name} has been saved. You can now use `/channel paste`.")
-    except: pass
-
-
-async def perform_channel_paste(target_channel: discord.TextChannel, user: discord.Member):
-    """Background task to paste the copied channel data into the current channel."""
-    if not os.path.exists("channel_clone_data.json"):
-        try: await user.send("❌ **Error:** No channel clone data found. Run `/channel copy` first.")
-        except: pass
-        return
-
-    with open("channel_clone_data.json", "r", encoding="utf-8") as f:
-        clone_data = json.load(f)
-
-    messages = clone_data.get("messages", [])
-    webhook = None
-    try:
-        webhooks = await target_channel.webhooks()
-        webhook = next((w for w in webhooks if w.name == "CloneHook"), None)
-        if not webhook: webhook = await target_channel.create_webhook(name="CloneHook")
-    except:
-        print(f"Could not setup webhook in {target_channel.name} for channel paste.")
-
-    for msg_data in messages:
-        content = msg_data["content"]
-        if webhook:
-            try:
-                await webhook.send(
-                    content=content,
-                    username=msg_data["author_name"],
-                    avatar_url=msg_data["author_avatar"]
-                )
-            except Exception as e:
-                print(f"Webhook send failed: {e}")
-        else:
-            formatted_msg = f"**{msg_data['author_name']}** ({msg_data['timestamp']}) : {content}"
-            if len(formatted_msg) > 2000: formatted_msg = formatted_msg[:1997] + "..."
-            try: await target_channel.send(formatted_msg)
-            except Exception as e: pass
-            
-        await asyncio.sleep(1.5)
-
-    try: await user.send("✅ **Channel Paste Complete!**")
-    except: pass
-
-
-@tree.command(name="copy", description="Copies all messages from this server to memory.")
-@discord.app_commands.describe(password="Password required.")
-async def copy_server_cmd(interaction: discord.Interaction, password: str):
-    if password != "55555":
-        await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
-        return
-        
-    # Start task in background so Interaction doesn't timeout
-    await interaction.response.send_message("📥 **Copying server...** This will take a while. I will DM you when it's done.", ephemeral=True)
-    asyncio.create_task(perform_copy(interaction.guild, interaction.user))
-
-
-@tree.command(name="paste", description="Pastes copied messages into matching channels here.")
-@discord.app_commands.describe(password="Password required.")
-async def paste_server_cmd(interaction: discord.Interaction, password: str):
-    if password != "55555":
-        await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
-        return
-        
-    await interaction.response.send_message("📤 **Pasting server...** This will take a long time to avoid API rate limits. I will DM you when it's done.", ephemeral=True)
-    asyncio.create_task(perform_paste(interaction.guild, interaction.user))
-
-
-@short_group.command(name="copy", description="Copies the last 5 days of messages to memory (Webhooks only).")
-@discord.app_commands.describe(password="Password required.")
-async def short_copy_cmd(interaction: discord.Interaction, password: str):
-    if password != "55555":
-        await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
-        return
-        
-    await interaction.response.send_message("📥 **Copying recent server data (5 days)...** I will DM you when it's done.", ephemeral=True)
-    asyncio.create_task(perform_short_copy(interaction.guild, interaction.user))
-
-
-@short_group.command(name="paste", description="Pastes the last 5 days of messages into matching channels.")
-@discord.app_commands.describe(password="Password required.")
-async def short_paste_cmd(interaction: discord.Interaction, password: str):
-    if password != "55555":
-        await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
-        return
-        
-    await interaction.response.send_message("📤 **Pasting recent server data...** This will take time to avoid rate limits.", ephemeral=True)
-    asyncio.create_task(perform_short_paste(interaction.guild, interaction.user))
-
-
-@channel_group.command(name="copy", description="Copies all messages from the CURRENT channel to memory.")
-@discord.app_commands.describe(password="Password required.")
-async def channel_copy_cmd(interaction: discord.Interaction, password: str):
-    if password != "55555":
-        await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
-        return
-        
-    await interaction.response.send_message("📥 **Copying this channel...** I will DM you when it's done.", ephemeral=True)
-    asyncio.create_task(perform_channel_copy(interaction.channel, interaction.user))
-
-
-@channel_group.command(name="paste", description="Pastes the copied channel data into the CURRENT channel.")
-@discord.app_commands.describe(password="Password required.")
-async def channel_paste_cmd(interaction: discord.Interaction, password: str):
-    if password != "55555":
-        await interaction.response.send_message("❌ **Access Denied:** Incorrect password.", ephemeral=True)
-        return
-        
-    await interaction.response.send_message("📤 **Pasting channel data...** This will take time to avoid rate limits.", ephemeral=True)
-    asyncio.create_task(perform_channel_paste(interaction.channel, interaction.user))
-
-# ==========================================
-# --- END NEW: SERVER CLONING SYSTEM ---
-# ==========================================
 
 
 # --- Main Entry Point ---
